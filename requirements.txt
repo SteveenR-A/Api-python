@@ -3,3 +3,6 @@ mariadb
 python-dotenv
 
 pytest
+
+customtkinter
+requests
