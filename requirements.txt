@@ -1,0 +1,5 @@
+Flask
+mariadb
+python-dotenv
+
+pytest
