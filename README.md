@@ -31,3 +31,4 @@ cp .env.example .env
 
 2. `.env` está en `.gitignore` por seguridad; no subas tus credenciales al repo.
 
+# friendly-octo-chainsaw
