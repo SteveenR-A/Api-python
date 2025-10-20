@@ -147,7 +147,8 @@ def create_app():
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            cur.execute('SELECT id, nombre, descripcion, precio, cantidad, creado_en FROM productos')
+            # La tabla real es `Productos` con columnas id_producto, precio_venta, stock
+            cur.execute('SELECT id_producto AS id, nombre, descripcion, precio_venta AS precio, stock AS cantidad, NULL AS creado_en FROM Productos')
             rows = cur.fetchall()
             cur.close()
             conn.close()
@@ -161,7 +162,7 @@ def create_app():
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            cur.execute('SELECT id, nombre, descripcion, precio, cantidad, creado_en FROM productos WHERE id = %s', (producto_id,))
+            cur.execute('SELECT id_producto AS id, nombre, descripcion, precio_venta AS precio, stock AS cantidad, NULL AS creado_en FROM Productos WHERE id_producto = %s', (producto_id,))
             row = cur.fetchone()
             cur.close()
             conn.close()
@@ -183,7 +184,8 @@ def create_app():
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            cur.execute('INSERT INTO productos (nombre, descripcion, precio, cantidad) VALUES (%s, %s, %s, %s)',
+            # Insertar mapeando a la estructura real: usar precio_venta y stock
+            cur.execute('INSERT INTO Productos (nombre, descripcion, precio_venta, stock) VALUES (%s, %s, %s, %s)',
                         (nombre, descripcion, precio, cantidad))
             conn.commit()
             new_id = getattr(cur, 'lastrowid', None)
@@ -200,14 +202,22 @@ def create_app():
             # Construir actualización dinámica mínima
             fields = []
             vals = []
+            # Mapear campos del API a columnas reales de la tabla Productos
+            mapping = {
+                'nombre': 'nombre',
+                'descripcion': 'descripcion',
+                'precio': 'precio_venta',
+                'cantidad': 'stock'
+            }
             for key in ('nombre', 'descripcion', 'precio', 'cantidad'):
                 if key in data:
-                    fields.append(f"{key} = %s")
+                    col = mapping.get(key, key)
+                    fields.append(f"{col} = %s")
                     vals.append(data[key])
             if not fields:
                 return jsonify({'error': 'No hay campos para actualizar'}), 400
             vals.append(producto_id)
-            sql = 'UPDATE productos SET ' + ', '.join(fields) + ' WHERE id = %s'
+            sql = 'UPDATE Productos SET ' + ', '.join(fields) + ' WHERE id_producto = %s'
             conn = database.get_connection()
             cur = conn.cursor()
             cur.execute(sql, tuple(vals))
@@ -224,7 +234,7 @@ def create_app():
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            cur.execute('DELETE FROM productos WHERE id = %s', (producto_id,))
+            cur.execute('DELETE FROM Productos WHERE id_producto = %s', (producto_id,))
             conn.commit()
             deleted = getattr(cur, 'rowcount', None)
             cur.close()
@@ -234,6 +244,461 @@ def create_app():
             return jsonify({'deleted': deleted}), 200
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+    # CRUD para clientes
+    @app.route('/clientes', methods=['GET'])
+    def clientes_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_cliente AS id, nombre, direccion, telefono, email FROM Clientes')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        clientes = []
+        for r in rows:
+            clientes.append({'id': r[0], 'nombre': r[1], 'direccion': r[2], 'telefono': r[3], 'email': r[4]})
+        return jsonify(clientes), 200
+
+    @app.route('/clientes/<int:cliente_id>', methods=['GET'])
+    def cliente_get(cliente_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_cliente AS id, nombre, direccion, telefono, email FROM Clientes WHERE id_cliente = %s', (cliente_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'nombre': row[1], 'direccion': row[2], 'telefono': row[3], 'email': row[4]}), 200
+
+    @app.route('/clientes', methods=['POST'])
+    def cliente_create():
+        data = request.get_json() or {}
+        nombre = data.get('nombre')
+        if not nombre:
+            return jsonify({'error': 'nombre es requerido'}), 400
+        direccion = data.get('direccion')
+        telefono = data.get('telefono')
+        email = data.get('email')
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Clientes (nombre, direccion, telefono, email) VALUES (%s, %s, %s, %s)',
+                    (nombre, direccion, telefono, email))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/clientes/<int:cliente_id>', methods=['PUT'])
+    def cliente_update(cliente_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('nombre', 'direccion', 'telefono', 'email'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(cliente_id)
+        sql = 'UPDATE Clientes SET ' + ', '.join(fields) + ' WHERE id_cliente = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/clientes/<int:cliente_id>', methods=['DELETE'])
+    def cliente_delete(cliente_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Clientes WHERE id_cliente = %s', (cliente_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
+
+    # CRUD para usuarios (sin hashing de contraseña, almacenar claro como la BD actual)
+    @app.route('/usuarios', methods=['GET'])
+    def usuarios_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id_usuario AS id, username, rol FROM Usuarios")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        usuarios = [{'id': r[0], 'username': r[1], 'rol': r[2]} for r in rows]
+        return jsonify(usuarios), 200
+
+    @app.route('/usuarios/<int:usuario_id>', methods=['GET'])
+    def usuario_get(usuario_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_usuario AS id, username, rol FROM Usuarios WHERE id_usuario = %s', (usuario_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'username': row[1], 'rol': row[2]}), 200
+
+    @app.route('/usuarios', methods=['POST'])
+    def usuario_create():
+        data = request.get_json() or {}
+        username = data.get('username')
+        password = data.get('password')
+        rol = data.get('rol', 'vendedor')
+        if not username or not password:
+            return jsonify({'error': 'username y password son requeridos'}), 400
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Usuarios (username, password, rol) VALUES (%s, %s, %s)',
+                    (username, password, rol))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/usuarios/<int:usuario_id>', methods=['PUT'])
+    def usuario_update(usuario_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('username', 'password', 'rol'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(usuario_id)
+        sql = 'UPDATE Usuarios SET ' + ', '.join(fields) + ' WHERE id_usuario = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/usuarios/<int:usuario_id>', methods=['DELETE'])
+    def usuario_delete(usuario_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Usuarios WHERE id_usuario = %s', (usuario_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
+
+    # CRUD para Compras
+    @app.route('/compras', methods=['GET'])
+    def compras_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_compra AS id, id_proveedor, fecha_compra, total FROM Compras')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        compras = [{'id': r[0], 'id_proveedor': r[1], 'fecha_compra': str(r[2]) if r[2] is not None else None, 'total': float(r[3])} for r in rows]
+        return jsonify(compras), 200
+
+    @app.route('/compras/<int:compra_id>', methods=['GET'])
+    def compra_get(compra_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_compra AS id, id_proveedor, fecha_compra, total FROM Compras WHERE id_compra = %s', (compra_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'id_proveedor': row[1], 'fecha_compra': str(row[2]) if row[2] is not None else None, 'total': float(row[3])}), 200
+
+    @app.route('/compras', methods=['POST'])
+    def compra_create():
+        data = request.get_json() or {}
+        id_proveedor = data.get('id_proveedor')
+        fecha_compra = data.get('fecha_compra')
+        total = data.get('total', 0.0)
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Compras (id_proveedor, fecha_compra, total) VALUES (%s, %s, %s)', (id_proveedor, fecha_compra, total))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/compras/<int:compra_id>', methods=['PUT'])
+    def compra_update(compra_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('id_proveedor', 'fecha_compra', 'total'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(compra_id)
+        sql = 'UPDATE Compras SET ' + ', '.join(fields) + ' WHERE id_compra = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/compras/<int:compra_id>', methods=['DELETE'])
+    def compra_delete(compra_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Compras WHERE id_compra = %s', (compra_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
+
+    # CRUD para Detalle_Compras
+    @app.route('/detalle_compras', methods=['GET'])
+    def detalle_compras_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_detalle_compra AS id, id_compra, id_producto, cantidad, precio_compra FROM Detalle_Compras')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = [{'id': r[0], 'id_compra': r[1], 'id_producto': r[2], 'cantidad': int(r[3]), 'precio_compra': float(r[4])} for r in rows]
+        return jsonify(out), 200
+
+    @app.route('/detalle_compras/<int:detalle_id>', methods=['GET'])
+    def detalle_compra_get(detalle_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_detalle_compra AS id, id_compra, id_producto, cantidad, precio_compra FROM Detalle_Compras WHERE id_detalle_compra = %s', (detalle_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'id_compra': row[1], 'id_producto': row[2], 'cantidad': int(row[3]), 'precio_compra': float(row[4])}), 200
+
+    @app.route('/detalle_compras', methods=['POST'])
+    def detalle_compra_create():
+        data = request.get_json() or {}
+        id_compra = data.get('id_compra')
+        id_producto = data.get('id_producto')
+        cantidad = data.get('cantidad', 0)
+        precio_compra = data.get('precio_compra', 0.0)
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Detalle_Compras (id_compra, id_producto, cantidad, precio_compra) VALUES (%s, %s, %s, %s)', (id_compra, id_producto, cantidad, precio_compra))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/detalle_compras/<int:detalle_id>', methods=['PUT'])
+    def detalle_compra_update(detalle_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('id_compra', 'id_producto', 'cantidad', 'precio_compra'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(detalle_id)
+        sql = 'UPDATE Detalle_Compras SET ' + ', '.join(fields) + ' WHERE id_detalle_compra = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/detalle_compras/<int:detalle_id>', methods=['DELETE'])
+    def detalle_compra_delete(detalle_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Detalle_Compras WHERE id_detalle_compra = %s', (detalle_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
+
+    # CRUD para Ventas
+    @app.route('/ventas', methods=['GET'])
+    def ventas_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_venta AS id, fecha_venta, id_cliente, total FROM Ventas')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = [{'id': r[0], 'fecha_venta': str(r[1]) if r[1] is not None else None, 'id_cliente': r[2], 'total': float(r[3])} for r in rows]
+        return jsonify(out), 200
+
+    @app.route('/ventas/<int:venta_id>', methods=['GET'])
+    def venta_get(venta_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_venta AS id, fecha_venta, id_cliente, total FROM Ventas WHERE id_venta = %s', (venta_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'fecha_venta': str(row[1]) if row[1] is not None else None, 'id_cliente': row[2], 'total': float(row[3])}), 200
+
+    @app.route('/ventas', methods=['POST'])
+    def venta_create():
+        data = request.get_json() or {}
+        fecha_venta = data.get('fecha_venta')
+        id_cliente = data.get('id_cliente')
+        total = data.get('total', 0.0)
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Ventas (fecha_venta, id_cliente, total) VALUES (%s, %s, %s)', (fecha_venta, id_cliente, total))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/ventas/<int:venta_id>', methods=['PUT'])
+    def venta_update(venta_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('fecha_venta', 'id_cliente', 'total'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(venta_id)
+        sql = 'UPDATE Ventas SET ' + ', '.join(fields) + ' WHERE id_venta = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/ventas/<int:venta_id>', methods=['DELETE'])
+    def venta_delete(venta_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Ventas WHERE id_venta = %s', (venta_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
+
+    # CRUD para Detalle_Ventas
+    @app.route('/detalle_ventas', methods=['GET'])
+    def detalle_ventas_list():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_detalle AS id, id_venta, id_producto, cantidad, precio_unitario FROM Detalle_Ventas')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = [{'id': r[0], 'id_venta': r[1], 'id_producto': r[2], 'cantidad': int(r[3]), 'precio_unitario': float(r[4])} for r in rows]
+        return jsonify(out), 200
+
+    @app.route('/detalle_ventas/<int:detalle_id>', methods=['GET'])
+    def detalle_venta_get(detalle_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id_detalle AS id, id_venta, id_producto, cantidad, precio_unitario FROM Detalle_Ventas WHERE id_detalle = %s', (detalle_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'No encontrado'}), 404
+        return jsonify({'id': row[0], 'id_venta': row[1], 'id_producto': row[2], 'cantidad': int(row[3]), 'precio_unitario': float(row[4])}), 200
+
+    @app.route('/detalle_ventas', methods=['POST'])
+    def detalle_venta_create():
+        data = request.get_json() or {}
+        id_venta = data.get('id_venta')
+        id_producto = data.get('id_producto')
+        cantidad = data.get('cantidad', 0)
+        precio_unitario = data.get('precio_unitario', 0.0)
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('INSERT INTO Detalle_Ventas (id_venta, id_producto, cantidad, precio_unitario) VALUES (%s, %s, %s, %s)', (id_venta, id_producto, cantidad, precio_unitario))
+        conn.commit()
+        new_id = getattr(cur, 'lastrowid', None)
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
+
+    @app.route('/detalle_ventas/<int:detalle_id>', methods=['PUT'])
+    def detalle_venta_update(detalle_id):
+        data = request.get_json() or {}
+        fields = []
+        vals = []
+        for key in ('id_venta', 'id_producto', 'cantidad', 'precio_unitario'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        vals.append(detalle_id)
+        sql = 'UPDATE Detalle_Ventas SET ' + ', '.join(fields) + ' WHERE id_detalle = %s'
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute(sql, tuple(vals))
+        conn.commit()
+        updated = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        return jsonify({'updated': updated}), 200
+
+    @app.route('/detalle_ventas/<int:detalle_id>', methods=['DELETE'])
+    def detalle_venta_delete(detalle_id):
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM Detalle_Ventas WHERE id_detalle = %s', (detalle_id,))
+        conn.commit()
+        deleted = getattr(cur, 'rowcount', None)
+        cur.close()
+        conn.close()
+        if not deleted:
+            return jsonify({'deleted': 0}), 404
+        return jsonify({'deleted': deleted}), 200
 
     return app
 

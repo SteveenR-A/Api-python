@@ -39,10 +39,17 @@ class ProveedoresApp(ctk.CTk):
         self.geometry("900x600")
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
-
         # Layout
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(padx=16, pady=16, fill="both", expand=True)
+
+        # Resource selector (Proveedores / Productos / Clientes)
+        selector_frame = ctk.CTkFrame(main_frame)
+        selector_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(selector_frame, text="Recurso:", width=80).pack(side="left", padx=(8, 4))
+        self.resource_var = ctk.StringVar(value="Proveedores")
+        self.resource_menu = ctk.CTkOptionMenu(selector_frame, values=["Proveedores", "Productos", "Clientes"], variable=self.resource_var, command=self.on_resource_change)
+        self.resource_menu.pack(side="left")
 
         table_frame = ctk.CTkFrame(main_frame)
         table_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
@@ -50,74 +57,71 @@ class ProveedoresApp(ctk.CTk):
         form_frame = ctk.CTkFrame(main_frame)
         form_frame.pack(side="right", fill="y")
 
-        # Treeview
-        columns = ("id", "nombre", "direccion", "telefono", "email")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings")
-        for col, text, width in [("id", "ID", 60), ("nombre", "Nombre", 180), ("direccion", "Dirección", 220), ("telefono", "Teléfono", 120), ("email", "Correo", 180)]:
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width)
+        # Treeview (configurable per recurso)
+        self.tree = ttk.Treeview(table_frame, show="headings")
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_row_select)
 
-        # Form
-        ctk.CTkLabel(form_frame, text="Detalle del Proveedor", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(8, 12))
-        ctk.CTkLabel(form_frame, text="Nombre:").pack(anchor="w", padx=8)
-        self.entry_nombre = ctk.CTkEntry(form_frame, width=260)
-        self.entry_nombre.pack(padx=8, pady=4)
+        # Form (reutilizable)
+        self.form_title = ctk.CTkLabel(form_frame, text="Detalle", font=ctk.CTkFont(size=14, weight="bold"))
+        self.form_title.pack(pady=(8, 12))
 
-        ctk.CTkLabel(form_frame, text="Dirección:").pack(anchor="w", padx=8)
-        self.entry_direccion = ctk.CTkEntry(form_frame, width=260)
-        self.entry_direccion.pack(padx=8, pady=4)
-
-        ctk.CTkLabel(form_frame, text="Teléfono:").pack(anchor="w", padx=8)
-        self.entry_telefono = ctk.CTkEntry(form_frame, width=260)
-        self.entry_telefono.pack(padx=8, pady=4)
-
-        ctk.CTkLabel(form_frame, text="Correo:").pack(anchor="w", padx=8)
-        self.entry_correo = ctk.CTkEntry(form_frame, width=260)
-        self.entry_correo.pack(padx=8, pady=4)
+        # four generic labeled entries
+        self.form_labels = []
+        self.form_entries = []
+        for _ in range(4):
+            lbl = ctk.CTkLabel(form_frame, text="")
+            lbl.pack(anchor="w", padx=8)
+            ent = ctk.CTkEntry(form_frame, width=260)
+            ent.pack(padx=8, pady=4)
+            self.form_labels.append(lbl)
+            self.form_entries.append(ent)
 
         # hidden id
         self._current_id = None
 
         ctk.CTkButton(form_frame, text="Nuevo", command=self.clear_form).pack(fill="x", padx=8, pady=(12, 4))
-        ctk.CTkButton(form_frame, text="Guardar", command=self.save_proveedor).pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(form_frame, text="Borrar", fg_color="#d9534f", command=self.delete_proveedor).pack(fill="x", padx=8, pady=4)
+        ctk.CTkButton(form_frame, text="Guardar", command=self.save_current).pack(fill="x", padx=8, pady=4)
+        ctk.CTkButton(form_frame, text="Borrar", fg_color="#d9534f", command=self.delete_current).pack(fill="x", padx=8, pady=4)
         ctk.CTkButton(form_frame, text="Salir", fg_color="#6c757d", command=self.on_close).pack(fill="x", padx=8, pady=(12, 4))
 
         # Start API if needed
         self._api_proc = ensure_api_running()
 
-        # Load data
-        self.load_proveedores()
+        # initial resource
+        self.on_resource_change(self.resource_var.get())
 
         # On close handler
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def load_proveedores(self):
         # clear
+        self.load_data_for('Proveedores')
+
+    def load_data_for(self, resource):
+        # clear
         for ch in self.tree.get_children():
             self.tree.delete(ch)
         try:
-            r = requests.get(f"{API_URL}/proveedores", timeout=3)
+            r = requests.get(f"{API_URL}/{resource.lower()}", timeout=3)
             if r.status_code == 200:
                 data = r.json()
                 for p in data:
-                    # normalize: if backend returns id_proveedor or id
-                    pid = p.get("id") or p.get("id_proveedor")
-                    self.tree.insert("", "end", values=(pid, p.get("nombre"), p.get("direccion"), p.get("telefono"), p.get("email")))
+                    pid = p.get('id') or p.get('id_' + resource[:-1].lower())
+                    if resource == 'Proveedores' or resource == 'Clientes':
+                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('direccion'), p.get('telefono'), p.get('email')))
+                    elif resource == 'Productos':
+                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio'), p.get('cantidad')))
             else:
-                messagebox.showerror("Error", f"API error {r.status_code}: {r.text}")
+                messagebox.showerror('Error', f'API error {r.status_code}: {r.text}')
         except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
 
     def clear_form(self):
         self._current_id = None
-        self.entry_nombre.delete(0, "end")
-        self.entry_direccion.delete(0, "end")
-        self.entry_telefono.delete(0, "end")
-        self.entry_correo.delete(0, "end")
-        self.entry_nombre.focus()
+        for ent in self.form_entries:
+            ent.delete(0, 'end')
+        self.form_entries[0].focus()
 
     def on_row_select(self, _event=None):
         sel = self.tree.focus()
@@ -127,58 +131,72 @@ class ProveedoresApp(ctk.CTk):
         if not vals:
             return
         self._current_id = vals[0]
-        self.entry_nombre.delete(0, "end")
-        self.entry_nombre.insert(0, vals[1])
-        self.entry_direccion.delete(0, "end")
-        self.entry_direccion.insert(0, vals[2])
-        self.entry_telefono.delete(0, "end")
-        self.entry_telefono.insert(0, vals[3])
-        self.entry_correo.delete(0, "end")
-        self.entry_correo.insert(0, vals[4])
+        # populate form entries depending on visible columns
+        for i in range(min(len(self.form_entries), len(vals)-1)):
+            try:
+                self.form_entries[i].delete(0, 'end')
+                self.form_entries[i].insert(0, vals[i+1])
+            except Exception:
+                pass
 
     def save_proveedor(self):
-        payload = {
-            "nombre": self.entry_nombre.get(),
-            "direccion": self.entry_direccion.get(),
-            "telefono": self.entry_telefono.get(),
-            "email": self.entry_correo.get(),
-        }
+        # legacy method kept for backward compatibility
+        self.save_current()
+
+    def save_current(self):
+        resource = self.resource_var.get()
+        # build payload based on resource
+        if resource in ('Proveedores', 'Clientes'):
+            payload = {
+                'nombre': self.form_entries[0].get(),
+                'direccion': self.form_entries[1].get(),
+                'telefono': self.form_entries[2].get(),
+                'email': self.form_entries[3].get()
+            }
+        elif resource == 'Productos':
+            payload = {
+                'nombre': self.form_entries[0].get(),
+                'descripcion': self.form_entries[1].get(),
+                'precio': float(self.form_entries[2].get() or 0),
+                'cantidad': int(self.form_entries[3].get() or 0)
+            }
+        else:
+            return
         try:
             if self._current_id:
-                r = requests.put(f"{API_URL}/proveedores/{self._current_id}", json=payload, timeout=4)
-                if r.status_code in (200, 204):
-                    messagebox.showinfo("OK", "Proveedor actualizado")
-                    self.clear_form()
-                    self.load_proveedores()
-                else:
-                    messagebox.showerror("Error", f"Actualizar: {r.status_code} {r.text}")
+                r = requests.put(f"{API_URL}/{resource.lower()}/{self._current_id}", json=payload, timeout=4)
             else:
-                r = requests.post(f"{API_URL}/proveedores", json=payload, timeout=4)
-                if r.status_code == 201:
-                    messagebox.showinfo("OK", "Proveedor creado")
-                    self.clear_form()
-                    self.load_proveedores()
-                else:
-                    messagebox.showerror("Error", f"Crear: {r.status_code} {r.text}")
+                r = requests.post(f"{API_URL}/{resource.lower()}", json=payload, timeout=4)
+            if r.status_code in (200, 201, 204):
+                messagebox.showinfo('OK', f'{resource[:-1]} guardado')
+                self.clear_form()
+                self.load_data_for(resource)
+            else:
+                messagebox.showerror('Error', f'{r.status_code} {r.text}')
         except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
 
     def delete_proveedor(self):
+        # kept for compatibility
+        self.delete_current()
+
+    def delete_current(self):
         if not self._current_id:
-            messagebox.showwarning("Selecciona", "Selecciona un proveedor")
+            messagebox.showwarning('Selecciona', 'Selecciona un elemento')
             return
-        if not messagebox.askyesno("Confirmar", "¿Eliminar proveedor?"):
+        if not messagebox.askyesno('Confirmar', '¿Eliminar?'):
             return
+        resource = self.resource_var.get()
         try:
-            r = requests.delete(f"{API_URL}/proveedores/{self._current_id}", timeout=4)
+            r = requests.delete(f"{API_URL}/{resource.lower()}/{self._current_id}", timeout=4)
             if r.status_code in (200, 204):
-                messagebox.showinfo("OK", "Eliminado")
+                messagebox.showinfo('OK', 'Eliminado')
                 self.clear_form()
-                self.load_proveedores()
+                self.load_data_for(resource)
             else:
-                messagebox.showerror("Error", f"Borrar: {r.status_code} {r.text}")
+                messagebox.showerror('Error', f'Borrar: {r.status_code} {r.text}')
         except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
 
     def on_close(self):
         # si arrancamos la API, intentar terminarla
@@ -189,6 +207,40 @@ class ProveedoresApp(ctk.CTk):
         except Exception:
             pass
         self.destroy()
+
+    def on_resource_change(self, new_resource):
+        # reconfigure UI for the selected resource
+        resource = new_resource
+        # configure form title and labels
+        if resource == 'Proveedores':
+            self.form_title.configure(text='Detalle del Proveedor')
+            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
+        elif resource == 'Productos':
+            self.form_title.configure(text='Detalle del Producto')
+            labels = ['Nombre', 'Descripción', 'Precio', 'Cantidad']
+        elif resource == 'Clientes':
+            self.form_title.configure(text='Detalle del Cliente')
+            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
+        else:
+            labels = ['', '', '', '']
+        for lbl, text in zip(self.form_labels, labels):
+            lbl.configure(text=text)
+
+        # configure tree columns
+        cols_config = {
+            'Proveedores': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)],
+            'Productos': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('descripcion', 'Descripción', 220), ('precio', 'Precio', 120), ('cantidad', 'Cantidad', 80)],
+            'Clientes': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)],
+        }
+        cfg = cols_config.get(resource, [])
+        # clear existing columns
+        self.tree.config(columns=[c[0] for c in cfg])
+        for col, text, width in cfg:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width)
+        # reload data
+        self.clear_form()
+        self.load_data_for(resource)
 
 
 if __name__ == "__main__":
