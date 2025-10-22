@@ -707,6 +707,52 @@ def create_app():
             return jsonify({'deleted': 0}), 404
         return jsonify({'deleted': deleted}), 200
 
+    # Reporte: Compras por rango de fecha
+    @app.route('/reportes/compras', methods=['GET'])
+    def reporte_compras():
+        desde = request.args.get('desde')
+        hasta = request.args.get('hasta')
+        if not desde or not hasta:
+            return jsonify({'error': 'Parametros desde y hasta son requeridos (YYYY-MM-DD)'}), 400
+        # validar formato de fecha
+        from datetime import datetime
+        try:
+            d_desde = datetime.strptime(desde, '%Y-%m-%d').date()
+            d_hasta = datetime.strptime(hasta, '%Y-%m-%d').date()
+        except Exception:
+            return jsonify({'error': 'Formato de fecha inválido, use YYYY-MM-DD'}), 400
+
+        conn = database.get_connection()
+        cur = conn.cursor()
+        try:
+            sql = (
+                "SELECT c.id_compra AS id, c.fecha_compra, c.total, p.id_proveedor AS id_proveedor, p.nombre AS proveedor "
+                "FROM Compras c LEFT JOIN Proveedores p ON c.id_proveedor = p.id_proveedor "
+                "WHERE c.fecha_compra BETWEEN %s AND %s ORDER BY c.fecha_compra"
+            )
+            cur.execute(sql, (desde, hasta))
+            rows = cur.fetchall()
+            compras = []
+            for r in rows:
+                compras.append({
+                    'id': r[0],
+                    'fecha_compra': str(r[1]) if r[1] is not None else None,
+                    'total': float(r[2]) if r[2] is not None else 0.0,
+                    'id_proveedor': r[3],
+                    'proveedor': r[4],
+                })
+
+            # suma total
+            cur.execute('SELECT COALESCE(SUM(total),0) FROM Compras WHERE fecha_compra BETWEEN %s AND %s', (desde, hasta))
+            suma = cur.fetchone()
+            suma_total = float(suma[0]) if suma and suma[0] is not None else 0.0
+            return jsonify({'desde': desde, 'hasta': hasta, 'suma_total': suma_total, 'compras': compras}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            cur.close()
+            conn.close()
+
     return app
 
 
