@@ -179,14 +179,21 @@ def create_app():
         descripcion = data.get('descripcion')
         precio = data.get('precio', 0.0)
         cantidad = data.get('cantidad', 0)
+        # campos adicionales requeridos por la tabla Productos
+        precio_compra = data.get('precio_compra', precio)
+        porcentaje_ganancia = data.get('porcentaje_ganancia', 0.0)
+        stock_minimo = data.get('stock_minimo', 0)
+        id_proveedor = data.get('id_proveedor', None)
         if not nombre:
             return jsonify({'error': 'nombre es requerido'}), 400
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            # Insertar mapeando a la estructura real: usar precio_venta y stock
-            cur.execute('INSERT INTO Productos (nombre, descripcion, precio_venta, stock) VALUES (%s, %s, %s, %s)',
-                        (nombre, descripcion, precio, cantidad))
+            # Insertar mapeando a la estructura real: usar precio_compra, porcentaje_ganancia, precio_venta y stock
+            cur.execute(
+                'INSERT INTO Productos (nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+                (nombre, descripcion, precio_compra, porcentaje_ganancia, precio, cantidad, stock_minimo, id_proveedor)
+            )
             conn.commit()
             new_id = getattr(cur, 'lastrowid', None)
             cur.close()
