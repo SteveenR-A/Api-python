@@ -6,3 +6,5 @@ pytest
 
 customtkinter
 requests
+bcrypt
+Flask-Bcrypt

@@ -32,6 +32,51 @@ def ensure_api_running(timeout=5):
     return p
 
 
+class LoginWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Login")
+        self.geometry("300x200")
+        self.parent = parent
+        self.user = None
+
+        self.username_entry = ctk.CTkEntry(self, placeholder_text="Username")
+        self.username_entry.pack(pady=10)
+        self.password_entry = ctk.CTkEntry(self, placeholder_text="Password", show="*")
+        self.password_entry.pack(pady=10)
+
+        login_button = ctk.CTkButton(self, text="Login", command=self.login)
+        login_button.pack(pady=20)
+
+        # Botón temporal para crear un usuario de prueba
+        create_user_button = ctk.CTkButton(self, text="Crear Usuario de Prueba", command=self.create_test_user)
+        create_user_button.pack(pady=10)
+
+    def create_test_user(self):
+        try:
+            r = requests.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test"}, timeout=3)
+            if r.status_code == 201:
+                messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente.")
+            else:
+                messagebox.showerror("Error", f"No se pudo crear el usuario: {r.text}")
+        except requests.RequestException as e:
+            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+
+    def login(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+
+        try:
+            r = requests.post(f"{API_URL}/login", json={"username": username, "password": password}, timeout=3)
+            if r.status_code == 200:
+                self.user = r.json().get("user")
+                self.destroy()
+            else:
+                messagebox.showerror("Error", "Credenciales inválidas")
+        except requests.RequestException as e:
+            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+
+
 class ProveedoresApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -244,5 +289,12 @@ class ProveedoresApp(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = ProveedoresApp()
-    app.mainloop()
+    root = ctk.CTk()
+    root.withdraw()  # Ocultar la ventana principal inicial
+
+    login_window = LoginWindow(root)
+    root.wait_window(login_window)
+
+    if login_window.user:
+        app = ProveedoresApp()
+        app.mainloop()

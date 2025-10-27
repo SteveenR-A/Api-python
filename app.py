@@ -1,9 +1,11 @@
 from flask import Flask, jsonify, request
+from flask_bcrypt import Bcrypt
 import database
 
 
 def create_app():
     app = Flask(__name__)
+    bcrypt = Bcrypt(app)
 
     # Inicializar esquema mínimo: crear tabla Proveedores si no existe
     try:
@@ -332,7 +334,29 @@ def create_app():
             return jsonify({'deleted': 0}), 404
         return jsonify({'deleted': deleted}), 200
 
-    # CRUD para usuarios (sin hashing de contraseña, almacenar claro como la BD actual)
+    # Ruta para login
+    @app.route('/login', methods=['POST'])
+    def login():
+        data = request.get_json() or {}
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({'error': 'Username y password son requeridos'}), 400
+
+        conn = database.get_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM Usuarios WHERE username = %s", (username,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if user and bcrypt.check_password_hash(user['password'], password):
+            return jsonify({'message': 'Login exitoso', 'user': {'id': user['id_usuario'], 'username': user['username'], 'rol': user['rol']}}), 200
+        else:
+            return jsonify({'error': 'Credenciales inválidas'}), 401
+
+    # CRUD para usuarios
     @app.route('/usuarios', methods=['GET'])
     def usuarios_list():
         conn = database.get_connection()
@@ -364,14 +388,22 @@ def create_app():
         rol = data.get('rol', 'vendedor')
         if not username or not password:
             return jsonify({'error': 'username y password son requeridos'}), 400
+        
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+        
         conn = database.get_connection()
         cur = conn.cursor()
-        cur.execute('INSERT INTO Usuarios (username, password, rol) VALUES (%s, %s, %s)',
-                    (username, password, rol))
-        conn.commit()
-        new_id = getattr(cur, 'lastrowid', None)
-        cur.close()
-        conn.close()
+        try:
+            cur.execute('INSERT INTO Usuarios (username, password, rol) VALUES (%s, %s, %s)',
+                        (username, hashed_password, rol))
+            conn.commit()
+            new_id = getattr(cur, 'lastrowid', None)
+        except database.mariadb.IntegrityError:
+            return jsonify({'error': 'El nombre de usuario ya existe'}), 409
+        finally:
+            cur.close()
+            conn.close()
+        
         return jsonify({'id': new_id}), 201
 
     @app.route('/usuarios/<int:usuario_id>', methods=['PUT'])
