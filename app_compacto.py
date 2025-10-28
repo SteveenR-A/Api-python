@@ -48,6 +48,7 @@ def get_connection(retries: int = 1, delay: float = 0.5) -> Optional[object]:
         except DatabaseConnectionError as e:
             last_exc = e
             if attempt < retries:
+                
                 time.sleep(delay)
     raise DatabaseConnectionError(f"No se pudo conectar a la base de datos después de {retries} intentos: {last_exc}")
 
