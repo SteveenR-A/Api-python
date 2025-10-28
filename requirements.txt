@@ -1,11 +1,10 @@
 Flask
 mariadb
 python-dotenv
-
-pytest
-
-customtkinter
-requests
-bcrypt
 Flask-Bcrypt
 customtkinter
+requests
+
+# Dev / test
+pytest
+Flask-Bcrypt

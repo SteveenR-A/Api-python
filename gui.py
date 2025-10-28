@@ -11,13 +11,12 @@ from tkinter import messagebox
 from tkinter import ttk
 from tkinter import simpledialog
 
-# Allow overriding API URL via env var; default to 127.0.0.1:5000
+# Usar API_URL del entorno, o default
 API_URL = os.getenv('API_URL', 'http://127.0.0.1:5000')
 
 
 def make_session(retries: int = 3, backoff_factor: float = 0.5, status_forcelist=(429, 500, 502, 503, 504)):
-    """Crear una requests.Session con reintentos configurados para reducir errores de conexión transitoria.
-    """
+    """Crear una requests.Session con reintentos."""
     session = requests.Session()
     retry = Retry(
         total=retries,
@@ -33,12 +32,12 @@ def make_session(retries: int = 3, backoff_factor: float = 0.5, status_forcelist
     return session
 
 
-# Sesión global usada por la GUI para todas las llamadas HTTP
+# Sesión global usada por la GUI
 SESSION = make_session()
 
 
 def ensure_api_running(timeout=5):
-    """Asegura que la API esté corriendo; si no, la arranca con el mismo python."""
+    """Asegura que la API esté corriendo; si no, la arranca."""
     global API_URL
     def is_up(url):
         try:
@@ -47,131 +46,124 @@ def ensure_api_running(timeout=5):
         except Exception:
             return False
 
-    # si API_URL ya responde, no hacemos nada
     if is_up(API_URL):
         return None
 
-    # Intentar arrancar la API en puertos comunes (5000, 5001).
-    # Pasamos la variable de entorno PORT al subprocess para que `app.py` la respete.
-    for port in (5000, 5001):
-        target = f"http://127.0.0.1:{port}"
-        env = os.environ.copy()
-        env['PORT'] = str(port)
-        # arrancar el servidor en background y capturar stderr a un pipe para debug opcional
-        try:
-            p = subprocess.Popen([sys.executable, "app.py"], cwd='.', env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        except Exception:
-            p = None
+    # Intentar arrancar la API en puerto 5000 (usando el app_compacto.py)
+    target = f"http://127.0.0.1:5000"
+    env = os.environ.copy()
+    env['PORT'] = '5000'
+    p = None
+    try:
+        # Asume que el servidor se llama 'app_compacto.py'
+        p = subprocess.Popen([sys.executable, "app_compacto.py"], cwd='.', env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except Exception as e:
+        print(f"No se pudo iniciar app_compacto.py: {e}")
 
-        # esperar hasta que responda /health o hasta timeout
-        start = time.time()
-        while time.time() - start < timeout:
-            if is_up(target):
-                # actualizar API_URL global para que el resto de la app use el puerto correcto
-                API_URL = target
-                return p
-            time.sleep(0.25)
+    start = time.time()
+    while time.time() - start < timeout:
+        if is_up(target):
+            API_URL = target
+            return p # Retorna el proceso para que pueda ser terminado al salir
+        time.sleep(0.25)
 
-        # si no arrancó en este puerto, intentar obtener stderr para diagnóstico y terminar proceso
-        if p:
-            try:
-                err = p.stderr.read().decode('utf-8', errors='ignore') if p.stderr else ''
-            except Exception:
-                err = ''
-            try:
-                p.terminate()
-                p.wait(timeout=1)
-            except Exception:
-                pass
+    if p:
+        p.terminate()
 
-    # Si no pudo arrancar automáticamente, pedir al usuario una URL alternativa
-    attempts = 0
-    while attempts < 3:
-        attempts += 1
-        answer = simpledialog.askstring("Configurar API", "No se pudo iniciar la API automáticamente. Introduce la URL de la API (ej: http://127.0.0.1:5001) o pulsa Cancel para abortar:")
-        if not answer:
-            break
-        answer = answer.strip()
-        if not answer.startswith('http'):
-            messagebox.showerror('URL inválida', 'La URL debe comenzar con http:// o https://')
-            continue
-        if is_up(answer):
-            API_URL = answer
-            return None
-        else:
-            messagebox.showerror('No accesible', f'La URL {answer} no responde en /health')
-
-    # No se pudo conectar o el usuario canceló
-    return None
+    # Si falla, preguntar al usuario
+    answer = simpledialog.askstring("Configurar API", "No se pudo iniciar la API. Introduce la URL (ej: http://127.0.0.1:5000):", initialvalue=API_URL)
+    if answer and is_up(answer):
+        API_URL = answer
+        return None
+    
+    messagebox.showerror("Error", "No se pudo conectar a la API. La aplicación se cerrará.")
+    sys.exit(1)
 
 
 def api_is_up(url, timeout=2):
-    """Comprobar si la API responde en /health y devolver (up, error_message)."""
+    """Comprobar si la API responde en /health."""
     try:
         r = SESSION.get(f"{url}/health", timeout=timeout)
         if r.status_code == 200:
             return True, None
-        return False, f"HTTP {r.status_code}: {r.text}"
+        return False, f"HTTP {r.status_code}"
     except Exception as e:
         return False, str(e)
-
 
 
 class LoginWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Login")
-        self.geometry("300x200")
+        self.geometry("300x240")
         self.parent = parent
         self.user = None
 
         self.username_entry = ctk.CTkEntry(self, placeholder_text="Username")
-        self.username_entry.pack(pady=10)
+        self.username_entry.pack(pady=10, padx=20, fill="x")
         self.password_entry = ctk.CTkEntry(self, placeholder_text="Password", show="*")
-        self.password_entry.pack(pady=10)
+        self.password_entry.pack(pady=10, padx=20, fill="x")
 
-        login_button = ctk.CTkButton(self, text="Login", command=self.login)
-        login_button.pack(pady=20)
+        self.login_button = ctk.CTkButton(self, text="Login", command=self.login)
+        self.login_button.pack(pady=20, padx=20, fill="x")
+        
+        self.create_user_button = ctk.CTkButton(self, text="Crear Usuario 'admin' (pass 'admin')", command=self.create_test_user)
+        self.create_user_button.pack(pady=10, padx=20, fill="x")
 
-        # Botón temporal para crear un usuario de prueba
-        create_user_button = ctk.CTkButton(self, text="Crear Usuario de Prueba", command=self.create_test_user)
-        create_user_button.pack(pady=10)
+        self.username_entry.focus()
+        self.bind("<Return>", lambda e: self.login())
 
     def create_test_user(self):
+        self.login_button.configure(state='disabled')
+        self.create_user_button.configure(state='disabled')
+        
         def worker():
             try:
-                r = SESSION.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test", "rol": "administrador"}, timeout=4)
-                status = r.status_code
-                text = r.text
+                # Crear un usuario 'admin' con rol 'administrador' y clave 'admin'
+                r = SESSION.post(f"{API_URL}/usuarios", json={"username": "admin", "password": "admin", "rol": "administrador"}, timeout=4)
+                if r.status_code == 201:
+                    self.after(0, lambda: messagebox.showinfo("Usuario Creado", "Usuario 'admin' (pass 'admin') creado. Ahora puedes hacer login."))
+                elif r.status_code == 409:
+                    self.after(0, lambda: messagebox.showinfo("Usuario Existe", "El usuario 'admin' ya existe."))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Error", f"No se pudo crear: {r.text}"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
-                return
-            if status == 201 or status == 409:
-                self.after(0, lambda: messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente o ya existe."))
-            else:
-                self.after(0, lambda: messagebox.showerror("Error", f"No se pudo crear el usuario: {text}"))
-
+            finally:
+                self.after(0, self.enable_buttons)
+        
         threading.Thread(target=worker, daemon=True).start()
 
-    def login(self):
+    def enable_buttons(self):
+        try:
+            self.login_button.configure(state='normal')
+            self.create_user_button.configure(state='normal')
+        except: pass # La ventana puede estar cerrada
+
+    def login(self, event=None):
         username = self.username_entry.get()
         password = self.password_entry.get()
+        if not username or not password:
+            messagebox.showwarning("Login", "Por favor, ingresa usuario y contraseña.")
+            return
+
+        self.login_button.configure(state='disabled')
+        self.create_user_button.configure(state='disabled')
+
         def worker():
             try:
                 r = SESSION.post(f"{API_URL}/login", json={"username": username, "password": password}, timeout=4)
-                status = r.status_code
-                data = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
+                if r.status_code == 200:
+                    self.user = r.json().get('user')
+                    self.after(0, self.destroy)
+                elif r.status_code == 401:
+                    self.after(0, lambda: messagebox.showerror("Error", "Credenciales inválidas"))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Error", f"Login falló: HTTP {r.status_code}"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
-                return
-            if status == 200:
-                user = data.get('user') if isinstance(data, dict) else None
-                def ok():
-                    self.user = user
-                    self.destroy()
-                self.after(0, ok)
-            else:
-                self.after(0, lambda: messagebox.showerror("Error", "Credenciales inválidas"))
+            finally:
+                self.after(0, self.enable_buttons)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -182,35 +174,52 @@ class ReportWindow(ctk.CTkToplevel):
         self.title(f"Reporte de {report_type}")
         self.geometry("800x600")
         self.report_type = report_type
+        self.parent = parent
 
         self.create_widgets()
-        self.load_report()
+        if self.report_type not in ["Existencias Mínimas", "Existencias"]:
+            # No cargar reportes de fecha hasta que el usuario ponga fechas
+            pass
+        else:
+            self.load_report()
 
     def create_widgets(self):
-        if self.report_type in ["Ventas", "Ganancias"]:
-            filter_frame = ctk.CTkFrame(self)
-            filter_frame.pack(pady=10)
+        top_frame = ctk.CTkFrame(self)
+        top_frame.pack(pady=10, padx=10, fill="x")
 
-            ctk.CTkLabel(filter_frame, text="Desde (YYYY-MM-DD):").pack(side="left", padx=5)
-            self.desde_entry = ctk.CTkEntry(filter_frame)
+        if self.report_type in ["Ventas", "Ganancias", "Compras"]:
+            ctk.CTkLabel(top_frame, text="Desde (YYYY-MM-DD):").pack(side="left", padx=5)
+            self.desde_entry = ctk.CTkEntry(top_frame, placeholder_text="2023-01-01")
             self.desde_entry.pack(side="left", padx=5)
-
-            ctk.CTkLabel(filter_frame, text="Hasta (YYYY-MM-DD):").pack(side="left", padx=5)
-            self.hasta_entry = ctk.CTkEntry(filter_frame)
+            ctk.CTkLabel(top_frame, text="Hasta (YYYY-MM-DD):").pack(side="left", padx=5)
+            self.hasta_entry = ctk.CTkEntry(top_frame, placeholder_text="2023-12-31")
             self.hasta_entry.pack(side="left", padx=5)
-
-            ctk.CTkButton(filter_frame, text="Filtrar", command=self.load_report).pack(side="left", padx=5)
+            ctk.CTkButton(top_frame, text="Filtrar", command=self.load_report).pack(side="left", padx=5)
+        else:
+             ctk.CTkLabel(top_frame, text=f"Reporte: {self.report_type}").pack(side="left", padx=5)
 
         self.tree = ttk.Treeview(self, show="headings")
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self.summary_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=14, weight="bold"))
+        self.summary_label.pack(pady=5, padx=10, fill="x")
 
     def load_report(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+        self.summary_label.configure(text="")
 
-        endpoint = f"{API_URL}/reportes/{self.report_type.lower().replace(' ', '_')}"
+        endpoint_map = {
+            "Ventas": "ventas",
+            "Compras": "compras",
+            "Ganancias": "ganancias",
+            "Existencias Mínimas": "existencias_minimas",
+            "Existencias": "existencias"
+        }
+        endpoint = f"{API_URL}/reportes/{endpoint_map.get(self.report_type)}"
+        
         params = {}
-        if self.report_type in ["Ventas", "Ganancias"]:
+        if self.report_type in ["Ventas", "Ganancias", "Compras"]:
             desde = self.desde_entry.get()
             hasta = self.hasta_entry.get()
             if not desde or not hasta:
@@ -220,33 +229,46 @@ class ReportWindow(ctk.CTkToplevel):
 
         def worker():
             try:
-                r = SESSION.get(endpoint, params=params, timeout=6)
+                r = SESSION.get(endpoint, params=params, timeout=10)
                 status = r.status_code
                 data = r.json() if r.headers.get('content-type','').startswith('application/json') else None
+                text = r.text
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
                 return
 
             def update_ui():
                 if status == 200 and data is not None:
+                    summary_text = ""
+                    list_data = []
+                    
                     if self.report_type == "Ventas":
-                        self.configure_tree([('id', 'ID', 50), ('fecha_venta', 'Fecha', 100), ('total', 'Total', 100), ('cliente', 'Cliente', 150)])
-                        for item in data.get('ventas', []):
-                            self.tree.insert("", "end", values=(item['id'], item['fecha_venta'], item['total'], item['cliente']))
+                        cols = [('id', 'ID', 50), ('fecha_venta', 'Fecha', 100), ('total', 'Total', 100), ('id_cliente', 'ID Cliente', 80), ('cliente', 'Cliente', 150)]
+                        list_data = data.get('ventas', [])
+                        summary_text = f"Total Ventas: {data.get('suma_total', 0):.2f}"
+                    elif self.report_type == "Compras":
+                        cols = [('id', 'ID', 50), ('fecha_compra', 'Fecha', 100), ('total', 'Total', 100), ('id_proveedor', 'ID Prov', 80), ('proveedor', 'Proveedor', 150)]
+                        list_data = data.get('compras', [])
+                        summary_text = f"Total Compras: {data.get('suma_total', 0):.2f}"
                     elif self.report_type == "Ganancias":
-                        self.configure_tree([('producto', 'Producto', 150), ('cantidad_vendida', 'Cantidad Vendida', 100), ('total_ventas', 'Total Ventas', 100), ('total_costo', 'Total Costo', 100), ('ganancia', 'Ganancia', 100)])
-                        for item in data.get('ganancias_por_producto', []):
-                            self.tree.insert("", "end", values=(item['producto'], item['cantidad_vendida'], item['total_ventas'], item['total_costo'], item['ganancia']))
+                        cols = [('producto', 'Producto', 150), ('cantidad_vendida', 'Cant.', 80), ('total_ventas', 'T. Ventas', 100), ('total_costo', 'T. Costo', 100), ('ganancia', 'Ganancia', 100)]
+                        list_data = data.get('ganancias_por_producto', [])
+                        summary_text = f"Ganancia Total: {data.get('ganancia_total', 0):.2f}"
                     elif self.report_type == "Existencias Mínimas":
-                        self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100), ('stock_minimo', 'Stock Mínimo', 100)])
-                        for item in data:
-                            self.tree.insert("", "end", values=(item['nombre'], item['stock'], item['stock_minimo']))
+                        cols = [('nombre', 'Nombre', 150), ('stock', 'Stock', 100), ('stock_minimo', 'Stock Mínimo', 100)]
+                        list_data = data
                     elif self.report_type == "Existencias":
-                        self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100)])
-                        for item in data:
-                            self.tree.insert("", "end", values=(item['nombre'], item['stock']))
+                        cols = [('nombre', 'Nombre', 150), ('stock', 'Stock', 100)]
+                        list_data = data
+                    
+                    self.configure_tree(cols)
+                    for item in list_data:
+                        self.tree.insert("", "end", values=tuple(item.get(c[0]) for c in cols))
+                    
+                    self.summary_label.configure(text=summary_text)
+
                 else:
-                    messagebox.showerror("Error", f"API error {status}: {r.text if 'r' in locals() else 'no response'}")
+                    messagebox.showerror("Error", f"API error {status}: {text}")
 
             self.after(0, update_ui)
 
@@ -256,190 +278,187 @@ class ReportWindow(ctk.CTkToplevel):
         self.tree.config(columns=[c[0] for c in columns])
         for col, text, width in columns:
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width)
+            self.tree.column(col, width=width, anchor="w")
+
 
 class MainApp(ctk.CTk):
-    def __init__(self):
+    def __init__(self, user_role='vendedor'):
         super().__init__()
         self.title("Sistema de Inventario")
         self.geometry("1024x768")
+        self.user_role = user_role
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
-        # Status bar / API controls
-        status_frame = ctk.CTkFrame(self)
-        status_frame.pack(side="top", fill="x")
-        self.api_status_label = ctk.CTkLabel(status_frame, text=f"API: {API_URL}", anchor="w")
-        self.api_status_label.pack(side="left", padx=8, pady=4)
-        ctk.CTkButton(status_frame, text="Configurar API", command=self.open_settings).pack(side="right", padx=8, pady=4)
+        
+        self._api_proc = None # Para guardar el proceso de la API si la GUI lo inicia
+        
+        # Iniciar API en background
+        threading.Thread(target=self._start_api_check, daemon=True).start()
 
+        self.create_widgets()
+        self.on_resource_change(self.resource_var.get()) # Cargar productos por defecto
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _start_api_check(self):
+        """Wrapper que ejecuta ensure_api_running en background."""
+        proc = ensure_api_running()
+        def cb():
+            self._api_proc = proc
+        self.after(0, cb)
+
+    def create_widgets(self):
+        # Frame principal
         main_frame = ctk.CTkFrame(self)
-        main_frame.pack(padx=16, pady=16, fill="both", expand=True)
+        main_frame.pack(padx=10, pady=10, fill="both", expand=True)
 
-        # Resource selector
+        main_frame.grid_columnconfigure(0, weight=3) # Columna para la tabla
+        main_frame.grid_columnconfigure(1, weight=1) # Columna para el formulario
+        main_frame.grid_rowconfigure(0, weight=0) # Fila para selectores
+        main_frame.grid_rowconfigure(1, weight=1) # Fila para tabla/formulario
+
+        # --- Selectores y Menús (Fila 0) ---
         selector_frame = ctk.CTkFrame(main_frame)
-        selector_frame.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(selector_frame, text="Módulo:", width=80).pack(side="left", padx=(8, 4))
+        selector_frame.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        
+        ctk.CTkLabel(selector_frame, text="Módulo:", width=60).pack(side="left", padx=(10, 5))
+        
+        # Módulos permitidos
+        modules = ["Productos", "Clientes", "Proveedores"]
+        if self.user_role == 'administrador':
+             # Administrador puede ver todo (ej. Compras, Ventas, Usuarios)
+             # modules.extend(["Compras", "Ventas", "Usuarios"]) # Descomentar si se implementan formularios
+             pass
+
         self.resource_var = ctk.StringVar(value="Productos")
-        self.resource_menu = ctk.CTkOptionMenu(selector_frame, values=["Productos", "Clientes", "Proveedores"], variable=self.resource_var, command=self.on_resource_change)
-        self.resource_menu.pack(side="left")
+        self.resource_menu = ctk.CTkOptionMenu(selector_frame, values=modules, variable=self.resource_var, command=self.on_resource_change)
+        self.resource_menu.pack(side="left", padx=5)
 
-        # Reports menu
+        # Menú de Reportes [cite: 1181-1185]
         reports_button = ctk.CTkButton(selector_frame, text="Reportes", command=self.open_reports_menu)
-        reports_button.pack(side="left", padx=10)
+        reports_button.pack(side="left", padx=20)
 
+        # Botón de Salir
+        ctk.CTkButton(selector_frame, text="Salir", fg_color="#6c757d", command=self.on_close).pack(side="right", padx=10)
+
+        # --- Tabla (Fila 1, Columna 0) ---
         table_frame = ctk.CTkFrame(main_frame)
-        table_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        form_frame = ctk.CTkFrame(main_frame)
-        form_frame.pack(side="right", fill="y")
+        table_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        table_frame.pack_propagate(False) # Evitar que el frame se encoja
 
         self.tree = ttk.Treeview(table_frame, show="headings")
-        self.tree.pack(fill="both", expand=True)
+        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
         self.tree.bind("<<TreeviewSelect>>", self.on_row_select)
 
-        self.form_title = ctk.CTkLabel(form_frame, text="Detalle", font=ctk.CTkFont(size=14, weight="bold"))
-        self.form_title.pack(pady=(8, 12))
+        # --- Formulario (Fila 1, Columna 1) ---
+        self.form_frame = ctk.CTkFrame(main_frame)
+        self.form_frame.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
 
-        self.form_labels = []
-        self.form_entries = []
-        for _ in range(6):
-            lbl = ctk.CTkLabel(form_frame, text="")
-            lbl.pack(anchor="w", padx=8)
-            ent = ctk.CTkEntry(form_frame, width=260)
-            ent.pack(padx=8, pady=4)
-            self.form_labels.append(lbl)
-            self.form_entries.append(ent)
+        self.form_title = ctk.CTkLabel(self.form_frame, text="Detalle", font=ctk.CTkFont(size=16, weight="bold"))
+        self.form_title.pack(pady=(10, 15), padx=10)
+
+        # Contenedor para los campos del formulario
+        self.fields_container = ctk.CTkFrame(self.form_frame, fg_color="transparent")
+        self.fields_container.pack(fill="x", expand=True, padx=10)
+
+        # Diccionario para guardar etiquetas y campos
+        self.form_fields = {}
+
+        # Botones del formulario
+        buttons_frame = ctk.CTkFrame(self.form_frame)
+        buttons_frame.pack(side="bottom", fill="x", padx=10, pady=10)
+
+        self.btn_new = ctk.CTkButton(buttons_frame, text="Nuevo", command=self.clear_form)
+        self.btn_new.pack(fill="x", pady=4)
+        self.btn_save = ctk.CTkButton(buttons_frame, text="Guardar", command=self.save_current)
+        self.btn_save.pack(fill="x", pady=4)
+        
+        # Solo admin puede borrar (ejemplo de restricción por rol)
+        if self.user_role == 'administrador':
+            self.btn_delete = ctk.CTkButton(buttons_frame, text="Borrar", fg_color="#d9534f", hover_color="#b52b27", command=self.delete_current)
+            self.btn_delete.pack(fill="x", pady=4)
 
         self._current_id = None
 
-        ctk.CTkButton(form_frame, text="Nuevo", command=self.clear_form).pack(fill="x", padx=8, pady=(12, 4))
-        ctk.CTkButton(form_frame, text="Guardar", command=self.save_current).pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(form_frame, text="Borrar", fg_color="#d9534f", command=self.delete_current).pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(form_frame, text="Salir", fg_color="#6c757d", command=self.on_close).pack(fill="x", padx=8, pady=(12, 4))
-
-        self._api_proc = ensure_api_running()
-        # actualizar indicador de estado
-        self.update_api_status()
-        self.on_resource_change(self.resource_var.get())
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def update_api_status(self):
-        up, err = api_is_up(API_URL, timeout=2)
-        text = f"API: {API_URL}"
-        if up:
-            self.api_status_label.configure(text=text + ' (OK)', text_color='green')
-        else:
-            self.api_status_label.configure(text=text + ' (NO CONECTA)', text_color='red')
-        # Return tuple for callers
-        return up, err
-
-    def open_settings(self):
-        SettingsWindow(self)
-
-    def set_api_url(self, new_url):
-        global API_URL
-        API_URL = new_url
-        # update displayed URL and session behavior
-        self.api_status_label.configure(text=f"API: {API_URL}")
-        self.update_api_status()
-
-class SettingsWindow(ctk.CTkToplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title('Ajustes de API')
-        self.geometry('420x140')
-        self.parent = parent
-
-        ctk.CTkLabel(self, text='API URL:').pack(anchor='w', padx=8, pady=(12,4))
-        self.url_entry = ctk.CTkEntry(self, width=380)
-        self.url_entry.pack(padx=8)
-        self.url_entry.insert(0, API_URL)
-
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill='x', pady=12, padx=8)
-        ctk.CTkButton(btn_frame, text='Probar y Guardar', command=self.test_and_save).pack(side='left')
-        ctk.CTkButton(btn_frame, text='Probar', command=self.test_only).pack(side='left', padx=8)
-        ctk.CTkButton(btn_frame, text='Cancelar', command=self.destroy).pack(side='right')
-
-    def test_only(self):
-        url = self.url_entry.get().strip()
-        if not url.startswith('http'):
-            messagebox.showerror('URL inválida', 'La URL debe empezar por http:// o https://')
-            return
-        up, err = api_is_up(url, timeout=3)
-        if up:
-            messagebox.showinfo('Conexión OK', f'La API responde en {url}/health')
-        else:
-            messagebox.showerror('Fallo conexión', f'No responde: {err}')
-
-    def test_and_save(self):
-        url = self.url_entry.get().strip()
-        if not url.startswith('http'):
-            messagebox.showerror('URL inválida', 'La URL debe empezar por http:// o https://')
-            return
-        up, err = api_is_up(url, timeout=3)
-        if up:
-            # persistir en .env para próximas ejecuciones (opcional)
-            try:
-                env_path = os.path.join(os.getcwd(), '.env')
-                # leer y reemplazar o añadir
-                lines = []
-                if os.path.exists(env_path):
-                    with open(env_path, 'r') as f:
-                        lines = f.read().splitlines()
-                updated = False
-                for i, line in enumerate(lines):
-                    if line.startswith('API_URL='):
-                        lines[i] = f'API_URL={url}'
-                        updated = True
-                if not updated:
-                    lines.append(f'API_URL={url}')
-                with open(env_path, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
-            except Exception as e:
-                messagebox.showwarning('Aviso', f'No se pudo escribir .env: {e}')
-
-            # Propagar al parent
-            self.parent.set_api_url(url)
-            messagebox.showinfo('Guardado', 'URL guardada y configurada')
-            self.destroy()
-        else:
-            messagebox.showerror('Fallo conexión', f'No responde: {err}')
-
     def open_reports_menu(self):
-        menu = ctk.CTkToplevel(self)
-        menu.title("Reportes")
-        menu.geometry("200x200")
-        ctk.CTkButton(menu, text="Ventas por Fecha", command=lambda: self.open_report_window("Ventas")).pack(pady=5)
-        ctk.CTkButton(menu, text="Ganancias por Fecha", command=lambda: self.open_report_window("Ganancias")).pack(pady=5)
-        ctk.CTkButton(menu, text="Existencias Mínimas", command=lambda: self.open_report_window("Existencias Mínimas")).pack(pady=5)
-        ctk.CTkButton(menu, text="Reporte de Existencias", command=lambda: self.open_report_window("Existencias")).pack(pady=5)
+        """Abre una ventana para seleccionar reportes[cite: 1181, 1182, 1183, 1184, 1185]."""
+        
+        # Evitar abrir múltiples ventanas de reportes
+        if hasattr(self, 'report_menu_window') and self.report_menu_window.winfo_exists():
+            self.report_menu_window.focus()
+            return
+
+        self.report_menu_window = ctk.CTkToplevel(self)
+        self.report_menu_window.title("Reportes")
+        self.report_menu_window.geometry("250x300")
+        
+        report_list = {
+            "Ventas por Fecha": "Ventas",
+            "Compras por Fecha": "Compras",
+            "Ganancias por Fecha": "Ganancias",
+            "Existencias Mínimas": "Existencias Mínimas",
+            "Catálogo de Existencias": "Existencias",
+            # "Catálogo de Productos": "Productos_Catalogo", # Se pueden añadir más
+            # "Catálogo de Clientes": "Clientes_Catalogo",
+            # "Catálogo de Proveedores": "Proveedores_Catalogo",
+        }
+        
+        for text, report_type in report_list.items():
+            # Deshabilitar reportes si el rol no lo permite
+            disabled = False
+            if self.user_role != 'administrador' and report_type in ["Ganancias", "Compras"]:
+                disabled = True
+            
+            btn = ctk.CTkButton(
+                self.report_menu_window, 
+                text=text, 
+                command=lambda rt=report_type: self.open_report_window(rt),
+                state="disabled" if disabled else "normal"
+            )
+            btn.pack(pady=5, padx=10, fill="x")
 
     def open_report_window(self, report_type):
         ReportWindow(self, report_type)
 
     def load_data_for(self, resource):
+        """Carga datos en el Treeview para el recurso (Productos, Clientes, etc.)"""
         for ch in self.tree.get_children():
             self.tree.delete(ch)
+            
+        endpoint = f"{API_URL}/{resource.lower()}"
+
         def worker():
             try:
-                r = SESSION.get(f"{API_URL}/{resource.lower()}", timeout=4)
+                r = SESSION.get(endpoint, timeout=4)
                 status = r.status_code
                 data = r.json() if r.headers.get('content-type','').startswith('application/json') else None
+                text = r.text
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}'))
                 return
 
             def update_ui():
                 if status == 200 and data is not None:
-                    for p in data:
-                        pid = p.get('id')
-                        if resource == 'Productos':
-                            self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio_compra'), p.get('porcentaje_ganancia'), p.get('precio_venta'), p.get('stock'), p.get('stock_minimo')))
-                        else: # Clientes and Proveedores
-                            self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('direccion'), p.get('telefono'), p.get('email')))
+                    if not data: return # No hay datos
+                    
+                    # Usar las llaves del primer item para definir columnas
+                    cols_map = self.get_resource_config(resource).get("cols_map", {})
+                    cols = []
+                    for key in data[0].keys():
+                        col_config = cols_map.get(key)
+                        if col_config:
+                            cols.append((key, col_config[0], col_config[1]))
+                        else:
+                            # Default para columnas no mapeadas (opcional)
+                            # cols.append((key, key.capitalize(), 100))
+                            pass
+                    
+                    self.configure_tree(cols)
+                    
+                    for item in data:
+                        values = tuple(item.get(c[0]) for c in cols)
+                        self.tree.insert('', 'end', values=values)
                 else:
-                    messagebox.showerror('Error', f'API error {status}: {r.text if "r" in locals() else "no response"}')
+                    messagebox.showerror('Error', f'API error {status}: {text}')
 
             self.after(0, update_ui)
 
@@ -447,49 +466,70 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def clear_form(self):
         self._current_id = None
-        for ent in self.form_entries:
-            ent.delete(0, 'end')
-        self.form_entries[0].focus()
+        for name, field in self.form_fields.items():
+            field["entry"].delete(0, 'end')
+        
+        # Enfocar el primer campo
+        if self.form_fields:
+            first_field_key = next(iter(self.form_fields))
+            self.form_fields[first_field_key]["entry"].focus()
 
     def on_row_select(self, _event=None):
         sel = self.tree.focus()
-        if not sel:
-            return
+        if not sel: return
         vals = self.tree.item(sel, "values")
-        if not vals:
-            return
-        self._current_id = vals[0]
-        for i in range(min(len(self.form_entries), len(vals)-1)):
-            try:
-                self.form_entries[i].delete(0, 'end')
-                self.form_entries[i].insert(0, vals[i+1])
-            except Exception:
-                pass
+        if not vals: return
+        
+        # Mapear valores de la fila a los campos del formulario
+        col_names = self.tree.cget("columns")
+        if not col_names: return
+
+        self.clear_form()
+        
+        # El ID (columna 0) se guarda, no se muestra en el formulario
+        self._current_id = vals[0] 
+        
+        for i, col_name in enumerate(col_names):
+            if col_name in self.form_fields:
+                field = self.form_fields[col_name]
+                field["entry"].insert(0, vals[i])
 
     def save_current(self):
+        """Guarda el item actual (POST si es nuevo, PUT si existe)"""
         resource = self.resource_var.get()
-        if resource == 'Productos':
-            payload = {
-                'nombre': self.form_entries[0].get(),
-                'descripcion': self.form_entries[1].get(),
-                'precio_compra': float(self.form_entries[2].get() or 0),
-                'porcentaje_ganancia': float(self.form_entries[3].get() or 0),
-                'stock': int(self.form_entries[4].get() or 0),
-                'stock_minimo': int(self.form_entries[5].get() or 0)
-            }
-        else: # Clientes and Proveedores
-            payload = {
-                'nombre': self.form_entries[0].get(),
-                'direccion': self.form_entries[1].get(),
-                'telefono': self.form_entries[2].get(),
-                'email': self.form_entries[3].get()
-            }
+        config = self.get_resource_config(resource)
+        
+        payload = {}
+        try:
+            for name, field in self.form_fields.items():
+                value = field["entry"].get()
+                # Convertir a tipo numérico si es necesario
+                if field["type"] == float:
+                    payload[name] = float(value or 0)
+                elif field["type"] == int:
+                    payload[name] = int(value or 0)
+                else:
+                    payload[name] = value
+        except ValueError as e:
+            messagebox.showerror("Error de Formato", f"Valor inválido: {e}")
+            return
+        
+        # Validar campos requeridos
+        for req_field in config.get("required_fields", []):
+            if not payload.get(req_field):
+                messagebox.showwarning("Campo Requerido", f"El campo '{req_field}' es requerido.")
+                return
+
         def worker():
             try:
+                endpoint = f"{API_URL}/{resource.lower()}"
                 if self._current_id:
-                    r = SESSION.put(f"{API_URL}/{resource.lower()}/{self._current_id}", json=payload, timeout=6)
+                    # Actualizar (PUT)
+                    r = SESSION.put(f"{endpoint}/{self._current_id}", json=payload, timeout=6)
                 else:
-                    r = SESSION.post(f"{API_URL}/{resource.lower()}", json=payload, timeout=6)
+                    # Crear (POST)
+                    r = SESSION.post(endpoint, json=payload, timeout=6)
+                
                 status = r.status_code
                 text = r.text
             except Exception as e:
@@ -497,27 +537,28 @@ class SettingsWindow(ctk.CTkToplevel):
                 return
 
             def ui_after():
-                if status in (200,201,204):
-                    messagebox.showinfo('OK', f'{resource[:-1]} guardado')
+                if status in (200, 201): # 200 OK (Update), 201 Created (Post)
+                    messagebox.showinfo('OK', f'{resource.rstrip("s")} guardado')
                     self.clear_form()
                     self.load_data_for(resource)
                 else:
                     messagebox.showerror('Error', f'{status} {text}')
 
-            self.after(0, ui_after)
-
         threading.Thread(target=worker, daemon=True).start()
 
     def delete_current(self):
         if not self._current_id:
-            messagebox.showwarning('Selecciona', 'Selecciona un elemento')
+            messagebox.showwarning('Selecciona', 'Selecciona un elemento de la tabla para borrar.')
             return
-        if not messagebox.askyesno('Confirmar', '¿Eliminar?'):
+        if not messagebox.askyesno('Confirmar', f'¿Eliminar el registro {self._current_id}?'):
             return
+            
         resource = self.resource_var.get()
+        
         def worker():
             try:
-                r = SESSION.delete(f"{API_URL}/{resource.lower()}/{self._current_id}", timeout=6)
+                endpoint = f"{API_URL}/{resource.lower()}/{self._current_id}"
+                r = SESSION.delete(endpoint, timeout=6)
                 status = r.status_code
                 text = r.text
             except Exception as e:
@@ -525,56 +566,124 @@ class SettingsWindow(ctk.CTkToplevel):
                 return
 
             def ui_after():
-                if status in (200, 204):
+                if status in (200, 204): # 200 OK, 204 No Content
                     messagebox.showinfo('OK', 'Eliminado')
                     self.clear_form()
                     self.load_data_for(resource)
                 else:
-                    messagebox.showerror('Error', f'Borrar: {status} {text}')
+                    messagebox.showerror('Error', f'Error al borrar: {status} {text}')
 
             self.after(0, ui_after)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self):
-        if self._api_proc:
-            self._api_proc.terminate()
-            self._api_proc.wait(timeout=2)
+        """Maneja el cierre de la ventana principal."""
+        if self._api_proc: # Si la GUI inició la API, la termina
+            try:
+                self._api_proc.terminate()
+                self._api_proc.wait(timeout=1)
+            except Exception as e:
+                print(f"No se pudo terminar el proceso de la API: {e}")
         self.destroy()
 
-    def on_resource_change(self, new_resource):
-        for widget in self.form_labels + self.form_entries:
-            widget.pack_forget()
-
-        if new_resource == 'Productos':
-            self.form_title.configure(text='Detalle del Producto')
-            labels = ['Nombre', 'Descripción', 'Precio Compra', 'Porcentaje Ganancia', 'Stock', 'Stock Mínimo']
-            cols = [('id', 'ID', 50), ('nombre', 'Nombre', 150), ('descripcion', 'Descripción', 200), ('precio_compra', 'P. Compra', 80), ('porcentaje_ganancia', '% Ganancia', 80), ('precio_venta', 'P. Venta', 80), ('stock', 'Stock', 60), ('stock_minimo', 'Stock Min.', 70)]
-        else: # Clientes and Proveedores
-            self.form_title.configure(text=f'Detalle de {new_resource[:-1]}')
-            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
-            cols = [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)]
-
-        for i, text in enumerate(labels):
-            self.form_labels[i].configure(text=text)
-            self.form_labels[i].pack(anchor="w", padx=8)
-            self.form_entries[i].pack(padx=8, pady=4)
-
-        self.tree.config(columns=[c[0] for c in cols])
-        for col, text, width in cols:
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width)
+    def get_resource_config(self, resource):
+        """Define la configuración del formulario y la tabla para cada módulo."""
         
+        # Define los campos del formulario (key: [Label, tipo, requerido])
+        # Define las columnas del Treeview (key: [Header, width])
+        # La 'key' debe coincidir con el JSON de la API
+        
+        if resource == 'Productos':
+            return {
+                "title": "Detalle del Producto",
+                "fields": {
+                    "nombre": ["Nombre", str, True],
+                    "descripcion": ["Descripción", str, False],
+                    "precio_compra": ["Precio Compra", float, True],
+                    "porcentaje_ganancia": ["% Ganancia", float, True],
+                    "stock": ["Stock", int, True],
+                    "stock_minimo": ["Stock Mínimo", int, True],
+                    "id_proveedor": ["ID Proveedor", int, False],
+                },
+                "cols_map": {
+                    "id": ["ID", 50],
+                    "nombre": ["Nombre", 150],
+                    "descripcion": ["Descripción", 200],
+                    "precio_compra": ["P. Compra", 80],
+                    "porcentaje_ganancia": ["% Ganancia", 80],
+                    "precio_venta": ["P. Venta", 80],
+                    "stock": ["Stock", 60],
+                    "stock_minimo": ["Stock Min.", 70],
+                },
+                "required_fields": ["nombre", "precio_compra", "porcentaje_ganancia"]
+            }
+        else: # Clientes y Proveedores [cite: 1179, 1180]
+            title = f'Detalle de {resource.rstrip("s")}'
+            return {
+                "title": title,
+                "fields": {
+                    "nombre": ["Nombre", str, True],
+                    "direccion": ["Dirección", str, False],
+                    "telefono": ["Teléfono", str, False],
+                    "email": ["Correo", str, False],
+                },
+                "cols_map": {
+                    "id": ["ID", 60],
+                    "nombre": ["Nombre", 180],
+                    "direccion": ["Dirección", 220],
+                    "telefono": ["Teléfono", 120],
+                    "email": ["Correo", 180],
+                },
+                "required_fields": ["nombre"]
+            }
+
+    def on_resource_change(self, new_resource):
+        """Reconfigura el formulario y la tabla al cambiar de módulo."""
+        
+        # Limpiar formulario anterior
+        for widget in self.fields_container.winfo_children():
+            widget.destroy()
+        self.form_fields = {}
+
+        config = self.get_resource_config(new_resource)
+        self.form_title.configure(text=config["title"])
+
+        # Crear nuevos campos de formulario
+        for name, (label_text, field_type, is_required) in config["fields"].items():
+            label = ctk.CTkLabel(self.fields_container, text=f"{label_text}{'*' if is_required else ''}")
+            label.pack(anchor="w", padx=0, pady=(10, 0))
+            entry = ctk.CTkEntry(self.fields_container, width=260)
+            entry.pack(fill="x", padx=0, pady=2)
+            self.form_fields[name] = {"label": label, "entry": entry, "type": field_type}
+
+        # Cargar datos en la tabla
         self.clear_form()
         self.load_data_for(new_resource)
+    
+    def configure_tree(self, columns):
+        """Configura las columnas del Treeview."""
+        self.tree.config(columns=[c[0] for c in columns])
+        for col, text, width in columns:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor="w")
 
+# --- Bloque para ejecutar la GUI ---
 if __name__ == "__main__":
+    ctk.set_appearance_mode("System")
+    ctk.set_default_color_theme("blue")
+    
     root = ctk.CTk()
-    root.withdraw()
+    root.withdraw() # Ocultar la ventana raíz principal
 
+    # Mostrar ventana de Login
     login_window = LoginWindow(root)
-    root.wait_window(login_window)
+    root.wait_window(login_window) # Esperar a que se cierre el login
 
     if login_window.user:
-        app = MainApp()
+        # Si el login es exitoso, mostrar la app principal
+        app = MainApp(user_role=login_window.user.get('rol', 'vendedor'))
         app.mainloop()
+    else:
+        # Si el usuario cerró el login, salir
+        root.destroy()
