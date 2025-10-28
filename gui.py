@@ -1,7 +1,10 @@
 import os
 import customtkinter as ctk
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import subprocess
+import threading
 import time
 import sys
 from tkinter import messagebox
@@ -12,12 +15,34 @@ from tkinter import simpledialog
 API_URL = os.getenv('API_URL', 'http://127.0.0.1:5000')
 
 
+def make_session(retries: int = 3, backoff_factor: float = 0.5, status_forcelist=(429, 500, 502, 503, 504)):
+    """Crear una requests.Session con reintentos configurados para reducir errores de conexión transitoria.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=frozenset(['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'])
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+
+# Sesión global usada por la GUI para todas las llamadas HTTP
+SESSION = make_session()
+
+
 def ensure_api_running(timeout=5):
     """Asegura que la API esté corriendo; si no, la arranca con el mismo python."""
     global API_URL
     def is_up(url):
         try:
-            r = requests.get(f"{url}/health", timeout=1)
+            r = SESSION.get(f"{url}/health", timeout=2)
             return r.status_code == 200
         except Exception:
             return False
@@ -80,6 +105,18 @@ def ensure_api_running(timeout=5):
     return None
 
 
+def api_is_up(url, timeout=2):
+    """Comprobar si la API responde en /health y devolver (up, error_message)."""
+    try:
+        r = SESSION.get(f"{url}/health", timeout=timeout)
+        if r.status_code == 200:
+            return True, None
+        return False, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, str(e)
+
+
+
 class LoginWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -101,28 +138,42 @@ class LoginWindow(ctk.CTkToplevel):
         create_user_button.pack(pady=10)
 
     def create_test_user(self):
-        try:
-            r = requests.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test", "rol": "administrador"}, timeout=3)
-            if r.status_code == 201 or r.status_code == 409:
-                messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente o ya existe.")
+        def worker():
+            try:
+                r = SESSION.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test", "rol": "administrador"}, timeout=4)
+                status = r.status_code
+                text = r.text
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
+                return
+            if status == 201 or status == 409:
+                self.after(0, lambda: messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente o ya existe."))
             else:
-                messagebox.showerror("Error", f"No se pudo crear el usuario: {r.text}")
-        except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+                self.after(0, lambda: messagebox.showerror("Error", f"No se pudo crear el usuario: {text}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def login(self):
         username = self.username_entry.get()
         password = self.password_entry.get()
-
-        try:
-            r = requests.post(f"{API_URL}/login", json={"username": username, "password": password}, timeout=3)
-            if r.status_code == 200:
-                self.user = r.json().get("user")
-                self.destroy()
+        def worker():
+            try:
+                r = SESSION.post(f"{API_URL}/login", json={"username": username, "password": password}, timeout=4)
+                status = r.status_code
+                data = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
+                return
+            if status == 200:
+                user = data.get('user') if isinstance(data, dict) else None
+                def ok():
+                    self.user = user
+                    self.destroy()
+                self.after(0, ok)
             else:
-                messagebox.showerror("Error", "Credenciales inválidas")
-        except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+                self.after(0, lambda: messagebox.showerror("Error", "Credenciales inválidas"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 class ReportWindow(ctk.CTkToplevel):
@@ -167,30 +218,39 @@ class ReportWindow(ctk.CTkToplevel):
                 return
             params = {"desde": desde, "hasta": hasta}
 
-        try:
-            r = requests.get(endpoint, params=params, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                if self.report_type == "Ventas":
-                    self.configure_tree([('id', 'ID', 50), ('fecha_venta', 'Fecha', 100), ('total', 'Total', 100), ('cliente', 'Cliente', 150)])
-                    for item in data.get('ventas', []):
-                        self.tree.insert("", "end", values=(item['id'], item['fecha_venta'], item['total'], item['cliente']))
-                elif self.report_type == "Ganancias":
-                    self.configure_tree([('producto', 'Producto', 150), ('cantidad_vendida', 'Cantidad Vendida', 100), ('total_ventas', 'Total Ventas', 100), ('total_costo', 'Total Costo', 100), ('ganancia', 'Ganancia', 100)])
-                    for item in data.get('ganancias_por_producto', []):
-                        self.tree.insert("", "end", values=(item['producto'], item['cantidad_vendida'], item['total_ventas'], item['total_costo'], item['ganancia']))
-                elif self.report_type == "Existencias Mínimas":
-                    self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100), ('stock_minimo', 'Stock Mínimo', 100)])
-                    for item in data:
-                        self.tree.insert("", "end", values=(item['nombre'], item['stock'], item['stock_minimo']))
-                elif self.report_type == "Existencias":
-                    self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100)])
-                    for item in data:
-                        self.tree.insert("", "end", values=(item['nombre'], item['stock']))
-            else:
-                messagebox.showerror("Error", f"API error {r.status_code}: {r.text}")
-        except requests.RequestException as e:
-            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+        def worker():
+            try:
+                r = SESSION.get(endpoint, params=params, timeout=6)
+                status = r.status_code
+                data = r.json() if r.headers.get('content-type','').startswith('application/json') else None
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}"))
+                return
+
+            def update_ui():
+                if status == 200 and data is not None:
+                    if self.report_type == "Ventas":
+                        self.configure_tree([('id', 'ID', 50), ('fecha_venta', 'Fecha', 100), ('total', 'Total', 100), ('cliente', 'Cliente', 150)])
+                        for item in data.get('ventas', []):
+                            self.tree.insert("", "end", values=(item['id'], item['fecha_venta'], item['total'], item['cliente']))
+                    elif self.report_type == "Ganancias":
+                        self.configure_tree([('producto', 'Producto', 150), ('cantidad_vendida', 'Cantidad Vendida', 100), ('total_ventas', 'Total Ventas', 100), ('total_costo', 'Total Costo', 100), ('ganancia', 'Ganancia', 100)])
+                        for item in data.get('ganancias_por_producto', []):
+                            self.tree.insert("", "end", values=(item['producto'], item['cantidad_vendida'], item['total_ventas'], item['total_costo'], item['ganancia']))
+                    elif self.report_type == "Existencias Mínimas":
+                        self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100), ('stock_minimo', 'Stock Mínimo', 100)])
+                        for item in data:
+                            self.tree.insert("", "end", values=(item['nombre'], item['stock'], item['stock_minimo']))
+                    elif self.report_type == "Existencias":
+                        self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100)])
+                        for item in data:
+                            self.tree.insert("", "end", values=(item['nombre'], item['stock']))
+                else:
+                    messagebox.showerror("Error", f"API error {status}: {r.text if 'r' in locals() else 'no response'}")
+
+            self.after(0, update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def configure_tree(self, columns):
         self.tree.config(columns=[c[0] for c in columns])
@@ -205,6 +265,12 @@ class MainApp(ctk.CTk):
         self.geometry("1024x768")
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
+        # Status bar / API controls
+        status_frame = ctk.CTkFrame(self)
+        status_frame.pack(side="top", fill="x")
+        self.api_status_label = ctk.CTkLabel(status_frame, text=f"API: {API_URL}", anchor="w")
+        self.api_status_label.pack(side="left", padx=8, pady=4)
+        ctk.CTkButton(status_frame, text="Configurar API", command=self.open_settings).pack(side="right", padx=8, pady=4)
 
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(padx=16, pady=16, fill="both", expand=True)
@@ -252,8 +318,93 @@ class MainApp(ctk.CTk):
         ctk.CTkButton(form_frame, text="Salir", fg_color="#6c757d", command=self.on_close).pack(fill="x", padx=8, pady=(12, 4))
 
         self._api_proc = ensure_api_running()
+        # actualizar indicador de estado
+        self.update_api_status()
         self.on_resource_change(self.resource_var.get())
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def update_api_status(self):
+        up, err = api_is_up(API_URL, timeout=2)
+        text = f"API: {API_URL}"
+        if up:
+            self.api_status_label.configure(text=text + ' (OK)', text_color='green')
+        else:
+            self.api_status_label.configure(text=text + ' (NO CONECTA)', text_color='red')
+        # Return tuple for callers
+        return up, err
+
+    def open_settings(self):
+        SettingsWindow(self)
+
+    def set_api_url(self, new_url):
+        global API_URL
+        API_URL = new_url
+        # update displayed URL and session behavior
+        self.api_status_label.configure(text=f"API: {API_URL}")
+        self.update_api_status()
+
+class SettingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title('Ajustes de API')
+        self.geometry('420x140')
+        self.parent = parent
+
+        ctk.CTkLabel(self, text='API URL:').pack(anchor='w', padx=8, pady=(12,4))
+        self.url_entry = ctk.CTkEntry(self, width=380)
+        self.url_entry.pack(padx=8)
+        self.url_entry.insert(0, API_URL)
+
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(fill='x', pady=12, padx=8)
+        ctk.CTkButton(btn_frame, text='Probar y Guardar', command=self.test_and_save).pack(side='left')
+        ctk.CTkButton(btn_frame, text='Probar', command=self.test_only).pack(side='left', padx=8)
+        ctk.CTkButton(btn_frame, text='Cancelar', command=self.destroy).pack(side='right')
+
+    def test_only(self):
+        url = self.url_entry.get().strip()
+        if not url.startswith('http'):
+            messagebox.showerror('URL inválida', 'La URL debe empezar por http:// o https://')
+            return
+        up, err = api_is_up(url, timeout=3)
+        if up:
+            messagebox.showinfo('Conexión OK', f'La API responde en {url}/health')
+        else:
+            messagebox.showerror('Fallo conexión', f'No responde: {err}')
+
+    def test_and_save(self):
+        url = self.url_entry.get().strip()
+        if not url.startswith('http'):
+            messagebox.showerror('URL inválida', 'La URL debe empezar por http:// o https://')
+            return
+        up, err = api_is_up(url, timeout=3)
+        if up:
+            # persistir en .env para próximas ejecuciones (opcional)
+            try:
+                env_path = os.path.join(os.getcwd(), '.env')
+                # leer y reemplazar o añadir
+                lines = []
+                if os.path.exists(env_path):
+                    with open(env_path, 'r') as f:
+                        lines = f.read().splitlines()
+                updated = False
+                for i, line in enumerate(lines):
+                    if line.startswith('API_URL='):
+                        lines[i] = f'API_URL={url}'
+                        updated = True
+                if not updated:
+                    lines.append(f'API_URL={url}')
+                with open(env_path, 'w') as f:
+                    f.write('\n'.join(lines) + '\n')
+            except Exception as e:
+                messagebox.showwarning('Aviso', f'No se pudo escribir .env: {e}')
+
+            # Propagar al parent
+            self.parent.set_api_url(url)
+            messagebox.showinfo('Guardado', 'URL guardada y configurada')
+            self.destroy()
+        else:
+            messagebox.showerror('Fallo conexión', f'No responde: {err}')
 
     def open_reports_menu(self):
         menu = ctk.CTkToplevel(self)
@@ -270,20 +421,29 @@ class MainApp(ctk.CTk):
     def load_data_for(self, resource):
         for ch in self.tree.get_children():
             self.tree.delete(ch)
-        try:
-            r = requests.get(f"{API_URL}/{resource.lower()}", timeout=3)
-            if r.status_code == 200:
-                data = r.json()
-                for p in data:
-                    pid = p.get('id')
-                    if resource == 'Productos':
-                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio_compra'), p.get('porcentaje_ganancia'), p.get('precio_venta'), p.get('stock'), p.get('stock_minimo')))
-                    else: # Clientes and Proveedores
-                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('direccion'), p.get('telefono'), p.get('email')))
-            else:
-                messagebox.showerror('Error', f'API error {r.status_code}: {r.text}')
-        except requests.RequestException as e:
-            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
+        def worker():
+            try:
+                r = SESSION.get(f"{API_URL}/{resource.lower()}", timeout=4)
+                status = r.status_code
+                data = r.json() if r.headers.get('content-type','').startswith('application/json') else None
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}'))
+                return
+
+            def update_ui():
+                if status == 200 and data is not None:
+                    for p in data:
+                        pid = p.get('id')
+                        if resource == 'Productos':
+                            self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio_compra'), p.get('porcentaje_ganancia'), p.get('precio_venta'), p.get('stock'), p.get('stock_minimo')))
+                        else: # Clientes and Proveedores
+                            self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('direccion'), p.get('telefono'), p.get('email')))
+                else:
+                    messagebox.showerror('Error', f'API error {status}: {r.text if "r" in locals() else "no response"}')
+
+            self.after(0, update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def clear_form(self):
         self._current_id = None
@@ -324,19 +484,29 @@ class MainApp(ctk.CTk):
                 'telefono': self.form_entries[2].get(),
                 'email': self.form_entries[3].get()
             }
-        try:
-            if self._current_id:
-                r = requests.put(f"{API_URL}/{resource.lower()}/{self._current_id}", json=payload, timeout=4)
-            else:
-                r = requests.post(f"{API_URL}/{resource.lower()}", json=payload, timeout=4)
-            if r.status_code in (200, 201, 204):
-                messagebox.showinfo('OK', f'{resource[:-1]} guardado')
-                self.clear_form()
-                self.load_data_for(resource)
-            else:
-                messagebox.showerror('Error', f'{r.status_code} {r.text}')
-        except requests.RequestException as e:
-            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
+        def worker():
+            try:
+                if self._current_id:
+                    r = SESSION.put(f"{API_URL}/{resource.lower()}/{self._current_id}", json=payload, timeout=6)
+                else:
+                    r = SESSION.post(f"{API_URL}/{resource.lower()}", json=payload, timeout=6)
+                status = r.status_code
+                text = r.text
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}'))
+                return
+
+            def ui_after():
+                if status in (200,201,204):
+                    messagebox.showinfo('OK', f'{resource[:-1]} guardado')
+                    self.clear_form()
+                    self.load_data_for(resource)
+                else:
+                    messagebox.showerror('Error', f'{status} {text}')
+
+            self.after(0, ui_after)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def delete_current(self):
         if not self._current_id:
@@ -345,16 +515,26 @@ class MainApp(ctk.CTk):
         if not messagebox.askyesno('Confirmar', '¿Eliminar?'):
             return
         resource = self.resource_var.get()
-        try:
-            r = requests.delete(f"{API_URL}/{resource.lower()}/{self._current_id}", timeout=4)
-            if r.status_code in (200, 204):
-                messagebox.showinfo('OK', 'Eliminado')
-                self.clear_form()
-                self.load_data_for(resource)
-            else:
-                messagebox.showerror('Error', f'Borrar: {r.status_code} {r.text}')
-        except requests.RequestException as e:
-            messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
+        def worker():
+            try:
+                r = SESSION.delete(f"{API_URL}/{resource.lower()}/{self._current_id}", timeout=6)
+                status = r.status_code
+                text = r.text
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}'))
+                return
+
+            def ui_after():
+                if status in (200, 204):
+                    messagebox.showinfo('OK', 'Eliminado')
+                    self.clear_form()
+                    self.load_data_for(resource)
+                else:
+                    messagebox.showerror('Error', f'Borrar: {status} {text}')
+
+            self.after(0, ui_after)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self):
         if self._api_proc:
