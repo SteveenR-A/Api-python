@@ -8,3 +8,4 @@ customtkinter
 requests
 bcrypt
 Flask-Bcrypt
+customtkinter

@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request
+import os
 from flask_bcrypt import Bcrypt
 import database
 
@@ -6,28 +7,6 @@ import database
 def create_app():
     app = Flask(__name__)
     bcrypt = Bcrypt(app)
-
-    # Inicializar esquema mínimo: crear tabla Proveedores si no existe
-    try:
-        conn_init = database.get_connection()
-        cur_init = conn_init.cursor()
-        cur_init.execute(
-            """
-            CREATE TABLE IF NOT EXISTS Proveedores (
-                id_proveedor INT AUTO_INCREMENT PRIMARY KEY,
-                nombre VARCHAR(255) NOT NULL,
-                direccion VARCHAR(255),
-                telefono VARCHAR(50),
-                email VARCHAR(255)
-            )
-            """
-        )
-        conn_init.commit()
-        cur_init.close()
-        conn_init.close()
-    except Exception:
-        # No fallamos el arranque si no hay DB; las rutas manejarán los errores.
-        pass
 
     @app.route('/health', methods=['GET'])
     def health():
@@ -144,6 +123,13 @@ def create_app():
             'creado_en': str(row[5]) if row[5] is not None else None,
         }
 
+    def row_to_dict(cur, row):
+        """Convertir una fila (tuple) a dict usando cur.description como claves."""
+        if row is None:
+            return None
+        cols = [d[0] for d in getattr(cur, 'description', [])]
+        return {cols[i]: row[i] for i in range(min(len(cols), len(row)))}
+
     @app.route('/productos', methods=['GET'])
     def productos_list():
         try:
@@ -178,23 +164,36 @@ def create_app():
     def producto_create():
         data = request.get_json() or {}
         nombre = data.get('nombre')
-        descripcion = data.get('descripcion')
-        precio = data.get('precio', 0.0)
-        cantidad = data.get('cantidad', 0)
-        # campos adicionales requeridos por la tabla Productos
-        precio_compra = data.get('precio_compra', precio)
-        porcentaje_ganancia = data.get('porcentaje_ganancia', 0.0)
-        stock_minimo = data.get('stock_minimo', 0)
-        id_proveedor = data.get('id_proveedor', None)
         if not nombre:
             return jsonify({'error': 'nombre es requerido'}), 400
+
+        descripcion = data.get('descripcion')
+        # soportar diferentes formas de payload: preferir precio_compra+porcentaje_ganancia,
+        # pero aceptar tambien precio (precio_venta) y cantidad
+        precio_compra = data.get('precio_compra')
+        porcentaje_ganancia = data.get('porcentaje_ganancia')
+        precio_venta = data.get('precio') or data.get('precio_venta')
+        stock = data.get('stock') if 'stock' in data else data.get('cantidad', 0)
+        stock_minimo = data.get('stock_minimo', 0)
+        id_proveedor = data.get('id_proveedor')
+
+        if precio_compra is None or porcentaje_ganancia is None:
+            # intentar derivar desde precio_venta si se proporcionó
+            if precio_venta is not None:
+                # si no hay porcentaje, asumimos 0% y precio_compra = precio_venta
+                precio_compra = precio_compra if precio_compra is not None else float(precio_venta)
+                porcentaje_ganancia = porcentaje_ganancia if porcentaje_ganancia is not None else 0.0
+            else:
+                return jsonify({'error': 'precio_compra y porcentaje_ganancia son requeridos (o proporcionar precio)'}), 400
+
+        precio_venta = float(precio_compra) * (1 + float(porcentaje_ganancia) / 100) if precio_venta is None else float(precio_venta)
+
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            # Insertar mapeando a la estructura real: usar precio_compra, porcentaje_ganancia, precio_venta y stock
             cur.execute(
                 'INSERT INTO Productos (nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                (nombre, descripcion, precio_compra, porcentaje_ganancia, precio, cantidad, stock_minimo, id_proveedor)
+                (nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor)
             )
             conn.commit()
             new_id = getattr(cur, 'lastrowid', None)
@@ -207,26 +206,44 @@ def create_app():
     @app.route('/productos/<int:producto_id>', methods=['PUT'])
     def producto_update(producto_id):
         data = request.get_json() or {}
+        # Si no hay campos en el body, devolver 400 sin consultar la BD (test espera esto)
+        if not data:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+        conn = database.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM Productos WHERE id_producto = %s", (producto_id,))
+        producto_row = cur.fetchone()
+        producto = row_to_dict(cur, producto_row)
+        cur.close()
+        conn.close()
+
+        if not producto:
+            return jsonify({'error': 'Producto no encontrado'}), 404
+
+        fields = []
+        vals = []
+
+        for key in ('nombre', 'descripcion', 'stock', 'stock_minimo', 'id_proveedor', 'precio_compra', 'porcentaje_ganancia'):
+            if key in data:
+                fields.append(f"{key} = %s")
+                vals.append(data[key])
+                producto[key] = data[key]
+
+        if not fields:
+            return jsonify({'error': 'No hay campos para actualizar'}), 400
+
+        if 'precio_compra' in data or 'porcentaje_ganancia' in data:
+            precio_compra = float(producto.get('precio_compra') or 0)
+            porcentaje_ganancia = float(producto.get('porcentaje_ganancia') or 0)
+            precio_venta = precio_compra * (1 + porcentaje_ganancia / 100)
+            if 'precio_venta' not in [f.split(' ')[0] for f in fields]:
+                fields.append('precio_venta = %s')
+                vals.append(precio_venta)
+
+        vals.append(producto_id)
+        sql = 'UPDATE Productos SET ' + ', '.join(fields) + ' WHERE id_producto = %s'
+        
         try:
-            # Construir actualización dinámica mínima
-            fields = []
-            vals = []
-            # Mapear campos del API a columnas reales de la tabla Productos
-            mapping = {
-                'nombre': 'nombre',
-                'descripcion': 'descripcion',
-                'precio': 'precio_venta',
-                'cantidad': 'stock'
-            }
-            for key in ('nombre', 'descripcion', 'precio', 'cantidad'):
-                if key in data:
-                    col = mapping.get(key, key)
-                    fields.append(f"{col} = %s")
-                    vals.append(data[key])
-            if not fields:
-                return jsonify({'error': 'No hay campos para actualizar'}), 400
-            vals.append(producto_id)
-            sql = 'UPDATE Productos SET ' + ', '.join(fields) + ' WHERE id_producto = %s'
             conn = database.get_connection()
             cur = conn.cursor()
             cur.execute(sql, tuple(vals))
@@ -345,14 +362,15 @@ def create_app():
             return jsonify({'error': 'Username y password son requeridos'}), 400
 
         conn = database.get_connection()
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor()
         cur.execute("SELECT * FROM Usuarios WHERE username = %s", (username,))
-        user = cur.fetchone()
+        user_row = cur.fetchone()
+        user = row_to_dict(cur, user_row)
         cur.close()
         conn.close()
 
-        if user and bcrypt.check_password_hash(user['password'], password):
-            return jsonify({'message': 'Login exitoso', 'user': {'id': user['id_usuario'], 'username': user['username'], 'rol': user['rol']}}), 200
+        if user and bcrypt.check_password_hash(user.get('password', ''), password):
+            return jsonify({'message': 'Login exitoso', 'user': {'id': user.get('id_usuario'), 'username': user.get('username'), 'rol': user.get('rol')}}), 200
         else:
             return jsonify({'error': 'Credenciales inválidas'}), 401
 
@@ -785,6 +803,151 @@ def create_app():
             cur.close()
             conn.close()
 
+    # Reporte: Ventas por rango de fecha
+    @app.route('/reportes/ventas', methods=['GET'])
+    def reporte_ventas():
+        desde = request.args.get('desde')
+        hasta = request.args.get('hasta')
+        if not desde or not hasta:
+            return jsonify({'error': 'Parametros desde y hasta son requeridos (YYYY-MM-DD)'}), 400
+        from datetime import datetime
+        try:
+            datetime.strptime(desde, '%Y-%m-%d')
+            datetime.strptime(hasta, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({'error': 'Formato de fecha inválido, use YYYY-MM-DD'}), 400
+
+        conn = database.get_connection()
+        cur = conn.cursor()
+        try:
+            sql = (
+                "SELECT v.id_venta AS id, v.fecha_venta, v.total, c.id_cliente, c.nombre AS cliente "
+                "FROM Ventas v LEFT JOIN Clientes c ON v.id_cliente = c.id_cliente "
+                "WHERE v.fecha_venta BETWEEN %s AND %s ORDER BY v.fecha_venta"
+            )
+            cur.execute(sql, (desde, hasta))
+            rows = cur.fetchall()
+            ventas = []
+            for r in rows:
+                ventas.append({
+                    'id': r[0],
+                    'fecha_venta': str(r[1]) if r[1] is not None else None,
+                    'total': float(r[2]) if r[2] is not None else 0.0,
+                    'id_cliente': r[3],
+                    'cliente': r[4],
+                })
+
+            cur.execute('SELECT COALESCE(SUM(total), 0) FROM Ventas WHERE fecha_venta BETWEEN %s AND %s', (desde, hasta))
+            suma = cur.fetchone()
+            suma_total = float(suma[0]) if suma and suma[0] is not None else 0.0
+            return jsonify({'desde': desde, 'hasta': hasta, 'suma_total': suma_total, 'ventas': ventas}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            cur.close()
+            conn.close()
+
+    # Reporte: Ganancias por rango de fecha
+    @app.route('/reportes/ganancias', methods=['GET'])
+    def reporte_ganancias():
+        desde = request.args.get('desde')
+        hasta = request.args.get('hasta')
+        if not desde or not hasta:
+            return jsonify({'error': 'Parametros desde y hasta son requeridos (YYYY-MM-DD)'}), 400
+        from datetime import datetime
+        try:
+            datetime.strptime(desde, '%Y-%m-%d')
+            datetime.strptime(hasta, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({'error': 'Formato de fecha inválido, use YYYY-MM-DD'}), 400
+
+        conn = database.get_connection()
+        cur = conn.cursor()
+        try:
+            sql = (
+                "SELECT p.nombre, SUM(dv.cantidad) as cantidad_vendida, "
+                "SUM(dv.cantidad * dv.precio_unitario) as total_ventas, "
+                "SUM(dv.cantidad * p.precio_compra) as total_costo, "
+                "SUM(dv.cantidad * (dv.precio_unitario - p.precio_compra)) as ganancia "
+                "FROM Detalle_Ventas dv "
+                "JOIN Ventas v ON dv.id_venta = v.id_venta "
+                "JOIN Productos p ON dv.id_producto = p.id_producto "
+                "WHERE v.fecha_venta BETWEEN %s AND %s "
+                "GROUP BY p.nombre"
+            )
+            cur.execute(sql, (desde, hasta))
+            rows = cur.fetchall()
+            ganancias_por_producto = []
+            for r in rows:
+                ganancias_por_producto.append({
+                    'producto': r[0],
+                    'cantidad_vendida': int(r[1]),
+                    'total_ventas': float(r[2]),
+                    'total_costo': float(r[3]),
+                    'ganancia': float(r[4])
+                })
+
+            cur.execute(
+                "SELECT SUM(dv.cantidad * (dv.precio_unitario - p.precio_compra)) as ganancia_total "
+                "FROM Detalle_Ventas dv "
+                "JOIN Ventas v ON dv.id_venta = v.id_venta "
+                "JOIN Productos p ON dv.id_producto = p.id_producto "
+                "WHERE v.fecha_venta BETWEEN %s AND %s",
+                (desde, hasta)
+            )
+            total_row = cur.fetchone()
+            ganancia_total = float(total_row[0]) if total_row and total_row[0] is not None else 0.0
+
+            return jsonify({
+                'desde': desde,
+                'hasta': hasta,
+                'ganancia_total': ganancia_total,
+                'ganancias_por_producto': ganancias_por_producto
+            }), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            cur.close()
+            conn.close()
+
+    # Reporte: Existencias al mínimo
+    @app.route('/reportes/existencias_minimas', methods=['GET'])
+    def reporte_existencias_minimas():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT nombre, stock, stock_minimo FROM Productos WHERE stock <= stock_minimo")
+            rows = cur.fetchall()
+            productos = []
+            for r in rows:
+                productos.append({
+                    'nombre': r[0],
+                    'stock': int(r[1]),
+                    'stock_minimo': int(r[2])
+                })
+            return jsonify(productos), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            cur.close()
+            conn.close()
+
+    # Reporte: Existencias
+    @app.route('/reportes/existencias', methods=['GET'])
+    def reporte_existencias():
+        conn = database.get_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT nombre, stock FROM Productos ORDER BY nombre")
+            rows = cur.fetchall()
+            productos = [{'nombre': r[0], 'stock': int(r[1])} for r in rows]
+            return jsonify(productos), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            cur.close()
+            conn.close()
+
     return app
 
 
@@ -792,5 +955,7 @@ app = create_app()
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Allow overriding the port via the PORT environment variable
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='127.0.0.1', port=port, debug=True)
     

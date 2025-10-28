@@ -1,3 +1,4 @@
+import os
 import customtkinter as ctk
 import requests
 import subprocess
@@ -5,31 +6,78 @@ import time
 import sys
 from tkinter import messagebox
 from tkinter import ttk
+from tkinter import simpledialog
 
-API_URL = "http://127.0.0.1:5000"
+# Allow overriding API URL via env var; default to 127.0.0.1:5000
+API_URL = os.getenv('API_URL', 'http://127.0.0.1:5000')
 
 
 def ensure_api_running(timeout=5):
     """Asegura que la API esté corriendo; si no, la arranca con el mismo python."""
-    try:
-        r = requests.get(f"{API_URL}/health", timeout=1)
-        if r.status_code == 200:
-            return None
-    except Exception:
-        pass
-
-    # arrancar
-    p = subprocess.Popen([sys.executable, "app.py"], cwd='.', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # esperar hasta que responda /health o hasta timeout
-    start = time.time()
-    while time.time() - start < timeout:
+    global API_URL
+    def is_up(url):
         try:
-            r = requests.get(f"{API_URL}/health", timeout=1)
-            if r.status_code == 200:
-                return p
+            r = requests.get(f"{url}/health", timeout=1)
+            return r.status_code == 200
         except Exception:
+            return False
+
+    # si API_URL ya responde, no hacemos nada
+    if is_up(API_URL):
+        return None
+
+    # Intentar arrancar la API en puertos comunes (5000, 5001).
+    # Pasamos la variable de entorno PORT al subprocess para que `app.py` la respete.
+    for port in (5000, 5001):
+        target = f"http://127.0.0.1:{port}"
+        env = os.environ.copy()
+        env['PORT'] = str(port)
+        # arrancar el servidor en background y capturar stderr a un pipe para debug opcional
+        try:
+            p = subprocess.Popen([sys.executable, "app.py"], cwd='.', env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except Exception:
+            p = None
+
+        # esperar hasta que responda /health o hasta timeout
+        start = time.time()
+        while time.time() - start < timeout:
+            if is_up(target):
+                # actualizar API_URL global para que el resto de la app use el puerto correcto
+                API_URL = target
+                return p
             time.sleep(0.25)
-    return p
+
+        # si no arrancó en este puerto, intentar obtener stderr para diagnóstico y terminar proceso
+        if p:
+            try:
+                err = p.stderr.read().decode('utf-8', errors='ignore') if p.stderr else ''
+            except Exception:
+                err = ''
+            try:
+                p.terminate()
+                p.wait(timeout=1)
+            except Exception:
+                pass
+
+    # Si no pudo arrancar automáticamente, pedir al usuario una URL alternativa
+    attempts = 0
+    while attempts < 3:
+        attempts += 1
+        answer = simpledialog.askstring("Configurar API", "No se pudo iniciar la API automáticamente. Introduce la URL de la API (ej: http://127.0.0.1:5001) o pulsa Cancel para abortar:")
+        if not answer:
+            break
+        answer = answer.strip()
+        if not answer.startswith('http'):
+            messagebox.showerror('URL inválida', 'La URL debe comenzar con http:// o https://')
+            continue
+        if is_up(answer):
+            API_URL = answer
+            return None
+        else:
+            messagebox.showerror('No accesible', f'La URL {answer} no responde en /health')
+
+    # No se pudo conectar o el usuario canceló
+    return None
 
 
 class LoginWindow(ctk.CTkToplevel):
@@ -54,9 +102,9 @@ class LoginWindow(ctk.CTkToplevel):
 
     def create_test_user(self):
         try:
-            r = requests.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test"}, timeout=3)
-            if r.status_code == 201:
-                messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente.")
+            r = requests.post(f"{API_URL}/usuarios", json={"username": "test", "password": "test", "rol": "administrador"}, timeout=3)
+            if r.status_code == 201 or r.status_code == 409:
+                messagebox.showinfo("Usuario Creado", "Usuario de prueba 'test' con contraseña 'test' creado exitosamente o ya existe.")
             else:
                 messagebox.showerror("Error", f"No se pudo crear el usuario: {r.text}")
         except requests.RequestException as e:
@@ -77,24 +125,101 @@ class LoginWindow(ctk.CTkToplevel):
             messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
 
 
-class ProveedoresApp(ctk.CTk):
+class ReportWindow(ctk.CTkToplevel):
+    def __init__(self, parent, report_type):
+        super().__init__(parent)
+        self.title(f"Reporte de {report_type}")
+        self.geometry("800x600")
+        self.report_type = report_type
+
+        self.create_widgets()
+        self.load_report()
+
+    def create_widgets(self):
+        if self.report_type in ["Ventas", "Ganancias"]:
+            filter_frame = ctk.CTkFrame(self)
+            filter_frame.pack(pady=10)
+
+            ctk.CTkLabel(filter_frame, text="Desde (YYYY-MM-DD):").pack(side="left", padx=5)
+            self.desde_entry = ctk.CTkEntry(filter_frame)
+            self.desde_entry.pack(side="left", padx=5)
+
+            ctk.CTkLabel(filter_frame, text="Hasta (YYYY-MM-DD):").pack(side="left", padx=5)
+            self.hasta_entry = ctk.CTkEntry(filter_frame)
+            self.hasta_entry.pack(side="left", padx=5)
+
+            ctk.CTkButton(filter_frame, text="Filtrar", command=self.load_report).pack(side="left", padx=5)
+
+        self.tree = ttk.Treeview(self, show="headings")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+
+    def load_report(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+
+        endpoint = f"{API_URL}/reportes/{self.report_type.lower().replace(' ', '_')}"
+        params = {}
+        if self.report_type in ["Ventas", "Ganancias"]:
+            desde = self.desde_entry.get()
+            hasta = self.hasta_entry.get()
+            if not desde or not hasta:
+                messagebox.showwarning("Filtro requerido", "Por favor ingrese un rango de fechas.")
+                return
+            params = {"desde": desde, "hasta": hasta}
+
+        try:
+            r = requests.get(endpoint, params=params, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if self.report_type == "Ventas":
+                    self.configure_tree([('id', 'ID', 50), ('fecha_venta', 'Fecha', 100), ('total', 'Total', 100), ('cliente', 'Cliente', 150)])
+                    for item in data.get('ventas', []):
+                        self.tree.insert("", "end", values=(item['id'], item['fecha_venta'], item['total'], item['cliente']))
+                elif self.report_type == "Ganancias":
+                    self.configure_tree([('producto', 'Producto', 150), ('cantidad_vendida', 'Cantidad Vendida', 100), ('total_ventas', 'Total Ventas', 100), ('total_costo', 'Total Costo', 100), ('ganancia', 'Ganancia', 100)])
+                    for item in data.get('ganancias_por_producto', []):
+                        self.tree.insert("", "end", values=(item['producto'], item['cantidad_vendida'], item['total_ventas'], item['total_costo'], item['ganancia']))
+                elif self.report_type == "Existencias Mínimas":
+                    self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100), ('stock_minimo', 'Stock Mínimo', 100)])
+                    for item in data:
+                        self.tree.insert("", "end", values=(item['nombre'], item['stock'], item['stock_minimo']))
+                elif self.report_type == "Existencias":
+                    self.configure_tree([('nombre', 'Nombre', 150), ('stock', 'Stock', 100)])
+                    for item in data:
+                        self.tree.insert("", "end", values=(item['nombre'], item['stock']))
+            else:
+                messagebox.showerror("Error", f"API error {r.status_code}: {r.text}")
+        except requests.RequestException as e:
+            messagebox.showerror("Conexión", f"No se pudo conectar a la API: {e}")
+
+    def configure_tree(self, columns):
+        self.tree.config(columns=[c[0] for c in columns])
+        for col, text, width in columns:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width)
+
+class MainApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Gestión de Proveedores")
-        self.geometry("900x600")
+        self.title("Sistema de Inventario")
+        self.geometry("1024x768")
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
-        # Layout
+
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(padx=16, pady=16, fill="both", expand=True)
 
-        # Resource selector (Proveedores / Productos / Clientes)
+        # Resource selector
         selector_frame = ctk.CTkFrame(main_frame)
         selector_frame.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(selector_frame, text="Recurso:", width=80).pack(side="left", padx=(8, 4))
-        self.resource_var = ctk.StringVar(value="Proveedores")
-        self.resource_menu = ctk.CTkOptionMenu(selector_frame, values=["Proveedores", "Productos", "Clientes"], variable=self.resource_var, command=self.on_resource_change)
+        ctk.CTkLabel(selector_frame, text="Módulo:", width=80).pack(side="left", padx=(8, 4))
+        self.resource_var = ctk.StringVar(value="Productos")
+        self.resource_menu = ctk.CTkOptionMenu(selector_frame, values=["Productos", "Clientes", "Proveedores"], variable=self.resource_var, command=self.on_resource_change)
         self.resource_menu.pack(side="left")
+
+        # Reports menu
+        reports_button = ctk.CTkButton(selector_frame, text="Reportes", command=self.open_reports_menu)
+        reports_button.pack(side="left", padx=10)
 
         table_frame = ctk.CTkFrame(main_frame)
         table_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
@@ -102,19 +227,16 @@ class ProveedoresApp(ctk.CTk):
         form_frame = ctk.CTkFrame(main_frame)
         form_frame.pack(side="right", fill="y")
 
-        # Treeview (configurable per recurso)
         self.tree = ttk.Treeview(table_frame, show="headings")
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_row_select)
 
-        # Form (reutilizable)
         self.form_title = ctk.CTkLabel(form_frame, text="Detalle", font=ctk.CTkFont(size=14, weight="bold"))
         self.form_title.pack(pady=(8, 12))
 
-        # four generic labeled entries
         self.form_labels = []
         self.form_entries = []
-        for _ in range(4):
+        for _ in range(6):
             lbl = ctk.CTkLabel(form_frame, text="")
             lbl.pack(anchor="w", padx=8)
             ent = ctk.CTkEntry(form_frame, width=260)
@@ -122,7 +244,6 @@ class ProveedoresApp(ctk.CTk):
             self.form_labels.append(lbl)
             self.form_entries.append(ent)
 
-        # hidden id
         self._current_id = None
 
         ctk.CTkButton(form_frame, text="Nuevo", command=self.clear_form).pack(fill="x", padx=8, pady=(12, 4))
@@ -130,21 +251,23 @@ class ProveedoresApp(ctk.CTk):
         ctk.CTkButton(form_frame, text="Borrar", fg_color="#d9534f", command=self.delete_current).pack(fill="x", padx=8, pady=4)
         ctk.CTkButton(form_frame, text="Salir", fg_color="#6c757d", command=self.on_close).pack(fill="x", padx=8, pady=(12, 4))
 
-        # Start API if needed
         self._api_proc = ensure_api_running()
-
-        # initial resource
         self.on_resource_change(self.resource_var.get())
-
-        # On close handler
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def load_proveedores(self):
-        # clear
-        self.load_data_for('Proveedores')
+    def open_reports_menu(self):
+        menu = ctk.CTkToplevel(self)
+        menu.title("Reportes")
+        menu.geometry("200x200")
+        ctk.CTkButton(menu, text="Ventas por Fecha", command=lambda: self.open_report_window("Ventas")).pack(pady=5)
+        ctk.CTkButton(menu, text="Ganancias por Fecha", command=lambda: self.open_report_window("Ganancias")).pack(pady=5)
+        ctk.CTkButton(menu, text="Existencias Mínimas", command=lambda: self.open_report_window("Existencias Mínimas")).pack(pady=5)
+        ctk.CTkButton(menu, text="Reporte de Existencias", command=lambda: self.open_report_window("Existencias")).pack(pady=5)
+
+    def open_report_window(self, report_type):
+        ReportWindow(self, report_type)
 
     def load_data_for(self, resource):
-        # clear
         for ch in self.tree.get_children():
             self.tree.delete(ch)
         try:
@@ -152,11 +275,11 @@ class ProveedoresApp(ctk.CTk):
             if r.status_code == 200:
                 data = r.json()
                 for p in data:
-                    pid = p.get('id') or p.get('id_' + resource[:-1].lower())
-                    if resource == 'Proveedores' or resource == 'Clientes':
+                    pid = p.get('id')
+                    if resource == 'Productos':
+                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio_compra'), p.get('porcentaje_ganancia'), p.get('precio_venta'), p.get('stock'), p.get('stock_minimo')))
+                    else: # Clientes and Proveedores
                         self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('direccion'), p.get('telefono'), p.get('email')))
-                    elif resource == 'Productos':
-                        self.tree.insert('', 'end', values=(pid, p.get('nombre'), p.get('descripcion'), p.get('precio'), p.get('cantidad')))
             else:
                 messagebox.showerror('Error', f'API error {r.status_code}: {r.text}')
         except requests.RequestException as e:
@@ -176,7 +299,6 @@ class ProveedoresApp(ctk.CTk):
         if not vals:
             return
         self._current_id = vals[0]
-        # populate form entries depending on visible columns
         for i in range(min(len(self.form_entries), len(vals)-1)):
             try:
                 self.form_entries[i].delete(0, 'end')
@@ -184,29 +306,24 @@ class ProveedoresApp(ctk.CTk):
             except Exception:
                 pass
 
-    def save_proveedor(self):
-        # legacy method kept for backward compatibility
-        self.save_current()
-
     def save_current(self):
         resource = self.resource_var.get()
-        # build payload based on resource
-        if resource in ('Proveedores', 'Clientes'):
+        if resource == 'Productos':
+            payload = {
+                'nombre': self.form_entries[0].get(),
+                'descripcion': self.form_entries[1].get(),
+                'precio_compra': float(self.form_entries[2].get() or 0),
+                'porcentaje_ganancia': float(self.form_entries[3].get() or 0),
+                'stock': int(self.form_entries[4].get() or 0),
+                'stock_minimo': int(self.form_entries[5].get() or 0)
+            }
+        else: # Clientes and Proveedores
             payload = {
                 'nombre': self.form_entries[0].get(),
                 'direccion': self.form_entries[1].get(),
                 'telefono': self.form_entries[2].get(),
                 'email': self.form_entries[3].get()
             }
-        elif resource == 'Productos':
-            payload = {
-                'nombre': self.form_entries[0].get(),
-                'descripcion': self.form_entries[1].get(),
-                'precio': float(self.form_entries[2].get() or 0),
-                'cantidad': int(self.form_entries[3].get() or 0)
-            }
-        else:
-            return
         try:
             if self._current_id:
                 r = requests.put(f"{API_URL}/{resource.lower()}/{self._current_id}", json=payload, timeout=4)
@@ -220,10 +337,6 @@ class ProveedoresApp(ctk.CTk):
                 messagebox.showerror('Error', f'{r.status_code} {r.text}')
         except requests.RequestException as e:
             messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
-
-    def delete_proveedor(self):
-        # kept for compatibility
-        self.delete_current()
 
     def delete_current(self):
         if not self._current_id:
@@ -244,57 +357,44 @@ class ProveedoresApp(ctk.CTk):
             messagebox.showerror('Conexión', f'No se pudo conectar a la API: {e}')
 
     def on_close(self):
-        # si arrancamos la API, intentar terminarla
-        try:
-            if self._api_proc:
-                self._api_proc.terminate()
-                self._api_proc.wait(timeout=2)
-        except Exception:
-            pass
+        if self._api_proc:
+            self._api_proc.terminate()
+            self._api_proc.wait(timeout=2)
         self.destroy()
 
     def on_resource_change(self, new_resource):
-        # reconfigure UI for the selected resource
-        resource = new_resource
-        # configure form title and labels
-        if resource == 'Proveedores':
-            self.form_title.configure(text='Detalle del Proveedor')
-            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
-        elif resource == 'Productos':
-            self.form_title.configure(text='Detalle del Producto')
-            labels = ['Nombre', 'Descripción', 'Precio', 'Cantidad']
-        elif resource == 'Clientes':
-            self.form_title.configure(text='Detalle del Cliente')
-            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
-        else:
-            labels = ['', '', '', '']
-        for lbl, text in zip(self.form_labels, labels):
-            lbl.configure(text=text)
+        for widget in self.form_labels + self.form_entries:
+            widget.pack_forget()
 
-        # configure tree columns
-        cols_config = {
-            'Proveedores': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)],
-            'Productos': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('descripcion', 'Descripción', 220), ('precio', 'Precio', 120), ('cantidad', 'Cantidad', 80)],
-            'Clientes': [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)],
-        }
-        cfg = cols_config.get(resource, [])
-        # clear existing columns
-        self.tree.config(columns=[c[0] for c in cfg])
-        for col, text, width in cfg:
+        if new_resource == 'Productos':
+            self.form_title.configure(text='Detalle del Producto')
+            labels = ['Nombre', 'Descripción', 'Precio Compra', 'Porcentaje Ganancia', 'Stock', 'Stock Mínimo']
+            cols = [('id', 'ID', 50), ('nombre', 'Nombre', 150), ('descripcion', 'Descripción', 200), ('precio_compra', 'P. Compra', 80), ('porcentaje_ganancia', '% Ganancia', 80), ('precio_venta', 'P. Venta', 80), ('stock', 'Stock', 60), ('stock_minimo', 'Stock Min.', 70)]
+        else: # Clientes and Proveedores
+            self.form_title.configure(text=f'Detalle de {new_resource[:-1]}')
+            labels = ['Nombre', 'Dirección', 'Teléfono', 'Correo']
+            cols = [('id', 'ID', 60), ('nombre', 'Nombre', 180), ('direccion', 'Dirección', 220), ('telefono', 'Teléfono', 120), ('email', 'Correo', 180)]
+
+        for i, text in enumerate(labels):
+            self.form_labels[i].configure(text=text)
+            self.form_labels[i].pack(anchor="w", padx=8)
+            self.form_entries[i].pack(padx=8, pady=4)
+
+        self.tree.config(columns=[c[0] for c in cols])
+        for col, text, width in cols:
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width)
-        # reload data
+        
         self.clear_form()
-        self.load_data_for(resource)
-
+        self.load_data_for(new_resource)
 
 if __name__ == "__main__":
     root = ctk.CTk()
-    root.withdraw()  # Ocultar la ventana principal inicial
+    root.withdraw()
 
     login_window = LoginWindow(root)
     root.wait_window(login_window)
 
     if login_window.user:
-        app = ProveedoresApp()
+        app = MainApp()
         app.mainloop()
