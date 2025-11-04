@@ -18,7 +18,12 @@ else:
     DBError = Exception
     IntegrityError = Exception
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:
+    # Si python-dotenv no está instalado, definimos un no-op y avisamos.
+    def load_dotenv(*args, **kwargs):
+        print("Aviso: python-dotenv no está instalado; se usarán variables de entorno del sistema.")
 from flask import Flask, jsonify, request
 from flask_bcrypt import Bcrypt
 from datetime import datetime
