@@ -398,6 +398,10 @@ class MainApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self._api_proc = None # Para guardar el proceso de la API si la GUI lo inicia
+        # Flag que indica que la lista de Productos quedó desactualizada (por ejemplo tras una venta)
+        # Si el usuario no está viendo Productos en el momento de la venta, marcamos este flag
+        # y cuando cambie a la vista Productos se recargará automáticamente.
+        self._products_dirty = False
 
         # Iniciar API en background
         threading.Thread(target=self._start_api_check, daemon=True).start()
@@ -661,7 +665,56 @@ class MainApp(ctk.CTk):
              if col_index < len(vals) and i < len(form_keys):
                  form_key = form_keys[i]
                  # Convertir None a cadena vacía para la entrada
-                 value_to_insert = vals[col_index] if vals[col_index] is not None else ""
+                 raw_val = vals[col_index] if vals[col_index] is not None else ""
+                 # Formatear según el tipo declarado en form_fields (int/float/str)
+                 field_type = self.form_fields[form_key]["type"]
+                 value_to_insert = ""
+                 try:
+                     if raw_val == "":
+                         value_to_insert = ""
+                     else:
+                         # raw_val puede venir como str o como número; normalizar a str mostrable
+                         if field_type == int:
+                             # Mostrar siempre como entero
+                             if isinstance(raw_val, (int, float)):
+                                 value_to_insert = str(int(raw_val))
+                             else:
+                                 # intentar parsear desde string
+                                 sval = str(raw_val).strip()
+                                 if sval == "":
+                                     value_to_insert = ""
+                                 else:
+                                     try:
+                                         # aceptar valores con punto (ej. '10.0')
+                                         if '.' in sval:
+                                             value_to_insert = str(int(float(sval)))
+                                         else:
+                                             value_to_insert = str(int(sval))
+                                     except Exception:
+                                         value_to_insert = sval
+                         elif field_type == float:
+                             # Mostrar sin decimales si es entero exacto, sino con 2 decimales
+                             if isinstance(raw_val, (int, float)):
+                                 f = float(raw_val)
+                                 if float(f).is_integer():
+                                     value_to_insert = str(int(f))
+                                 else:
+                                     value_to_insert = f"{f:.2f}"
+                             else:
+                                 sval = str(raw_val).strip()
+                                 try:
+                                     f = float(sval)
+                                     if float(f).is_integer():
+                                         value_to_insert = str(int(f))
+                                     else:
+                                         value_to_insert = f"{f:.2f}"
+                                 except Exception:
+                                     value_to_insert = sval
+                         else:
+                             value_to_insert = str(raw_val)
+                 except Exception:
+                     value_to_insert = str(raw_val)
+
                  self.form_fields[form_key]["entry"].insert(0, value_to_insert)
 
         # Habilitar botón de venta por cliente sólo si el recurso actual es Clientes
@@ -725,14 +778,16 @@ class MainApp(ctk.CTk):
             nonlocal payload # Permitir modificar payload si la API devuelve el objeto creado/actualizado
             try:
                 endpoint = f"{API_URL}/{resource.lower()}"
+                # Evitar enviar valores None que rompan conversiones en el servidor
+                payload_to_send = {k: v for k, v in payload.items() if v is not None}
                 if self._current_id:
                     # Actualizar (PUT)
-                    print(f"PUT {endpoint}/{self._current_id} with payload: {payload}") # Debug
-                    r = SESSION.put(f"{endpoint}/{self._current_id}", json=payload, timeout=6)
+                    print(f"PUT {endpoint}/{self._current_id} with payload: {payload_to_send}") # Debug
+                    r = SESSION.put(f"{endpoint}/{self._current_id}", json=payload_to_send, timeout=6)
                 else:
                     # Crear (POST)
-                    print(f"POST {endpoint} with payload: {payload}") # Debug
-                    r = SESSION.post(endpoint, json=payload, timeout=6)
+                    print(f"POST {endpoint} with payload: {payload_to_send}") # Debug
+                    r = SESSION.post(endpoint, json=payload_to_send, timeout=6)
 
                 status = r.status_code
                 try:
@@ -751,8 +806,12 @@ class MainApp(ctk.CTk):
                     self.clear_form()
                     self.load_data_for(resource) # Recargar la tabla
                 else:
-                     error_msg = response_data if isinstance(response_data, str) else response_data.get('error', 'Error desconocido')
-                     messagebox.showerror('Error', f'Error al guardar: {status} - {error_msg}')
+                     # Mostrar detalle del error (texto o JSON) para depuración
+                     if isinstance(response_data, dict):
+                         detail = response_data.get('error') or response_data
+                     else:
+                         detail = response_data
+                     messagebox.showerror('Error', f'Error al guardar: {status} - {detail}')
 
 
             self.after(0, ui_after)
@@ -847,6 +906,15 @@ class MainApp(ctk.CTk):
             row.pack(fill='x', pady=4)
             # OptionMenu para producto
             var = ctk.StringVar(value="")
+            # Cuando cambie la selección del OptionMenu, recalcular total y actualizar labels
+            try:
+                var.trace_add('write', lambda *args: update_total())
+            except Exception:
+                # fallback para versiones antiguas
+                try:
+                    var.trace('w', lambda *args: update_total())
+                except Exception:
+                    pass
             if prod_options:
                 names = [f"{p['id']} - {p['nombre']} (stock:{p['stock']})" for p in prod_options]
             else:
@@ -864,10 +932,12 @@ class MainApp(ctk.CTk):
             # Bind para recalcular total cuando cambie cantidad
             qty_entry.bind('<KeyRelease>', lambda e: update_total())
 
+            # Cuando eliminamos, remover exactamente la tupla que almacenamos en product_rows
             remove_btn = ctk.CTkButton(row, text='Eliminar', fg_color='#d9534f', hover_color='#b52b27', width=90,
-                                      command=lambda r=row: (r.destroy(), product_rows.remove((row, var, qty_entry, price_label, stock_label)), update_total()))
+                                      command=lambda r=row, v=var, o=opt, q=qty_entry, p=price_label, s=stock_label: (r.destroy(), product_rows.remove((r, v, o, q, p, s)), update_total()))
             remove_btn.pack(side='left', padx=6)
-            product_rows.append((row, var, qty_entry, opt, price_label, stock_label))
+            # Guardar la tupla en el orden: (row, var, opt, qty_entry, price_label, stock_label)
+            product_rows.append((row, var, opt, qty_entry, price_label, stock_label))
 
         def populate_products(prods):
             nonlocal products_list
@@ -900,7 +970,7 @@ class MainApp(ctk.CTk):
 
         def update_total():
             total = 0.0
-            for (_row, var, qty_entry, opt, price_label, stock_label) in product_rows:
+            for (_row, var, opt, qty_entry, price_label, stock_label) in product_rows:
                 choice = var.get()
                 if not choice:
                     continue
@@ -931,7 +1001,7 @@ class MainApp(ctk.CTk):
         def on_confirm():
             # Leer filas y construir lista de items
             items = []
-            for (_row, var, qty_entry, opt) in product_rows:
+            for (_row, var, opt, qty_entry, price_label, stock_label) in product_rows:
                 choice = var.get()
                 if not choice:
                     continue
@@ -1015,12 +1085,25 @@ class MainApp(ctk.CTk):
             # Ejecutar callback en hilo principal
             def ui_cb():
                 if success:
-                    # refrescar listados
+                    # Evitar recargar ambos recursos y cambiar la vista actual.
+                    # Solo recargar el recurso visible. Si el usuario no está en Productos,
+                    # marcamos Productos como "sucios" para que se recarguen cuando el usuario
+                    # cambie a la vista Productos.
                     try:
-                        self.load_data_for('Productos')
-                        self.load_data_for('Clientes')
+                        current = self.resource_var.get()
                     except Exception:
-                        pass
+                        current = None
+                    try:
+                        if current == 'Productos':
+                            self.load_data_for('Productos')
+                        elif current == 'Clientes':
+                            self.load_data_for('Clientes')
+                        else:
+                            # No forzar recarga que cambie la vista
+                            self._products_dirty = True
+                    except Exception:
+                        # Si falla cualquier recarga, marcar productos como sucios
+                        self._products_dirty = True
                     if callback:
                         callback(True, f'Venta registrada (total: {total:.2f})')
                 else:
@@ -1136,6 +1219,13 @@ class MainApp(ctk.CTk):
 
         self.clear_form()
         self.load_data_for(new_resource)
+        # Si estábamos marcando Productos como sucios y el usuario acaba de cambiar
+        # a la vista Productos, limpiar el flag (ya hemos recargado).
+        try:
+            if new_resource == 'Productos':
+                self._products_dirty = False
+        except Exception:
+            pass
 
     def configure_tree(self, columns):
         """Configura las columnas del Treeview."""

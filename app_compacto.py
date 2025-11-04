@@ -65,6 +65,64 @@ def create_app():
         cols = [d[0] for d in getattr(cur, 'description', [])]
         return {cols[i]: row[i] for i in range(min(len(cols), len(row)))}
 
+    def normalize_product(prod: dict) -> dict:
+        """Asegura tipos consistentes para los campos de Productos.
+
+        Convierte precios a float y stocks a int para evitar que la GUI muestre valores
+        con punto decimal cuando corresponda.
+        """
+        if not prod:
+            return prod
+        p = prod.copy()
+        # Campos numéricos que deben ser float
+        for f in ('precio_compra', 'porcentaje_ganancia', 'precio_venta'):
+            try:
+                p[f] = float(p.get(f)) if p.get(f) is not None else 0.0
+                # si es entero exacto, mantener como número con .0 (la GUI puede formatear)
+            except Exception:
+                p[f] = 0.0
+        # Campos que deben ser int
+        for f in ('stock', 'stock_minimo', 'id_proveedor'):
+            try:
+                val = p.get(f)
+                if val is None:
+                    p[f] = None if f == 'id_proveedor' else 0
+                else:
+                    p[f] = int(val)
+            except Exception:
+                p[f] = 0 if f != 'id_proveedor' else None
+        # Asegurar id como int si existe
+        if 'id' in p and p['id'] is not None:
+            try:
+                p['id'] = int(p['id'])
+            except Exception:
+                pass
+        return p
+
+    def get_last_insert_id(cur, conn=None):
+        """Fallback para obtener el último id insertado en caso cursor.lastrowid sea None.
+
+        Intenta usar LAST_INSERT_ID() en la conexión si está disponible.
+        """
+        try:
+            # Algunas conexiones/ drivers pueden exponer lastrowid; si no, intentar con SELECT LAST_INSERT_ID()
+            lid = getattr(cur, 'lastrowid', None)
+            if lid:
+                return int(lid)
+        except Exception:
+            pass
+        try:
+            if conn is not None:
+                c2 = conn.cursor()
+                c2.execute('SELECT LAST_INSERT_ID()')
+                row = c2.fetchone()
+                c2.close()
+                if row:
+                    return int(row[0])
+        except Exception:
+            pass
+        return None
+
     @app.route('/health', methods=['GET'])
     def health():
         return jsonify({'status': 'ok'}), 200
@@ -152,7 +210,7 @@ def create_app():
             cur = conn.cursor()
             cur.execute('SELECT id_producto AS id, nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor FROM Productos')
             rows = cur.fetchall()
-            productos = [row_to_dict(cur, r) for r in rows]
+            productos = [normalize_product(row_to_dict(cur, r)) for r in rows]
             cur.close()
             conn.close()
             return jsonify(productos), 200
@@ -166,7 +224,7 @@ def create_app():
             cur = conn.cursor()
             cur.execute('SELECT id_producto AS id, nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor FROM Productos WHERE id_producto = %s', (producto_id,))
             row = cur.fetchone()
-            producto = row_to_dict(cur, row)
+            producto = normalize_product(row_to_dict(cur, row))
             cur.close()
             conn.close()
             if not producto:
@@ -182,15 +240,23 @@ def create_app():
             precio_compra = float(data.get('precio_compra', 0))
             porcentaje_ganancia = float(data.get('porcentaje_ganancia', 0))
             precio_venta = precio_compra * (1 + porcentaje_ganancia / 100)
+            # Normalizar tipos para evitar inconsistencias
+            stock = int(data.get('stock', 0) or 0)
+            stock_minimo = int(data.get('stock_minimo', 0) or 0)
+            id_proveedor = data.get('id_proveedor')
+            try:
+                id_proveedor = int(id_proveedor) if id_proveedor is not None and id_proveedor != '' else None
+            except Exception:
+                id_proveedor = None
 
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
                 'INSERT INTO Productos (nombre, descripcion, precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                (data.get('nombre'), data.get('descripcion'), precio_compra, porcentaje_ganancia, precio_venta, data.get('stock', 0), data.get('stock_minimo', 0), data.get('id_proveedor'))
+                (data.get('nombre'), data.get('descripcion'), precio_compra, porcentaje_ganancia, precio_venta, stock, stock_minimo, id_proveedor)
             )
             conn.commit()
-            new_id = getattr(cur, 'lastrowid', None)
+            new_id = get_last_insert_id(cur, conn)
             cur.close()
             conn.close()
             return jsonify({'id': new_id}), 201
@@ -219,9 +285,27 @@ def create_app():
             fields, vals = [], []
             for key in ('nombre', 'descripcion', 'stock', 'stock_minimo', 'id_proveedor', 'precio_compra', 'porcentaje_ganancia'):
                 if key in data:
+                    # Normalizar tipos según el campo
+                    val = data[key]
+                    if key in ('stock', 'stock_minimo'):
+                        try:
+                            val = int(val)
+                        except Exception:
+                            val = 0
+                    elif key in ('precio_compra', 'porcentaje_ganancia'):
+                        try:
+                            val = float(val)
+                        except Exception:
+                            val = 0.0
+                    elif key == 'id_proveedor':
+                        try:
+                            val = int(val) if val is not None and val != '' else None
+                        except Exception:
+                            val = None
+
                     fields.append(f"{key} = %s")
-                    vals.append(data[key])
-                    producto[key] = data[key] # Actualizar valor local
+                    vals.append(val)
+                    producto[key] = val # Actualizar valor local
 
             # Recalcular precio_venta si cambiaron los componentes
             if 'precio_compra' in data or 'porcentaje_ganancia' in data:
@@ -292,15 +376,15 @@ def create_app():
     @app.route('/clientes', methods=['POST'])
     def cliente_create():
         data = request.get_json() or {}
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute('INSERT INTO Clientes (nombre, direccion, telefono, email) VALUES (%s, %s, %s, %s)',
-                    (data.get('nombre'), data.get('direccion'), data.get('telefono'), data.get('email')))
-        conn.commit()
-        new_id = getattr(cur, 'lastrowid', None)
-        cur.close()
-        conn.close()
-        return jsonify({'id': new_id}), 201
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('INSERT INTO Clientes (nombre, direccion, telefono, email) VALUES (%s, %s, %s, %s)',
+            (data.get('nombre'), data.get('direccion'), data.get('telefono'), data.get('email')))
+    conn.commit()
+    new_id = get_last_insert_id(cur, conn)
+    cur.close()
+    conn.close()
+    return jsonify({'id': new_id}), 201
 
     @app.route('/clientes/<int:cliente_id>', methods=['PUT'])
     def cliente_update(cliente_id):
@@ -374,7 +458,7 @@ def create_app():
             cur.execute('INSERT INTO Usuarios (username, password, rol) VALUES (%s, %s, %s)',
                         (username, hashed_password, rol))
             conn.commit()
-            new_id = getattr(cur, 'lastrowid', None)
+            new_id = get_last_insert_id(cur, conn)
         except mariadb.IntegrityError:
             return jsonify({'error': 'El nombre de usuario ya existe'}), 409
         finally:
