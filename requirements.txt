@@ -10,3 +10,4 @@ pytest
 Flask-Bcrypt
 pandas
 openpyxl
+PyMySQL

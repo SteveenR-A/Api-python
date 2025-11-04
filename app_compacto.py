@@ -1,7 +1,23 @@
 import os
 import time
 from typing import Optional
-import mariadb
+try:
+    import mariadb as mariadb_driver
+except Exception:
+    mariadb_driver = None
+    try:
+        import pymysql as mariadb_driver
+    except Exception:
+        mariadb_driver = None
+
+# Map common exception types for compatibility between mariadb and pymysql
+if mariadb_driver is not None:
+    DBError = getattr(mariadb_driver, 'Error', Exception)
+    IntegrityError = getattr(mariadb_driver, 'IntegrityError', Exception)
+else:
+    DBError = Exception
+    IntegrityError = Exception
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_bcrypt import Bcrypt
@@ -28,7 +44,10 @@ def create_connection(host: Optional[str] = None, user: Optional[str] = None, pa
     database = database or os.getenv('DB_NAME')
 
     try:
-        conn = mariadb.connect(
+        if mariadb_driver is None:
+            raise DatabaseConnectionError('No se encontró ningún driver de MariaDB/MySQL (mariadb o pymysql).')
+        # mariadb and pymysql have slightly different APIs but both accept these common params
+        conn = mariadb_driver.connect(
             user=user,
             password=password,
             host=host,
@@ -36,7 +55,7 @@ def create_connection(host: Optional[str] = None, user: Optional[str] = None, pa
             connect_timeout=connect_timeout
         )
         return conn
-    except mariadb.Error as e:
+    except DBError as e:
         raise DatabaseConnectionError(str(e))
 
 def get_connection(retries: int = 1, delay: float = 0.5) -> Optional[object]:
@@ -343,7 +362,7 @@ def create_app():
             if not deleted:
                 return jsonify({'deleted': 0}), 404
             return jsonify({'deleted': deleted}), 200
-        except mariadb.Error as e:
+        except DBError as e:
             # Capturar error de restricción (ej. ON DELETE RESTRICT)
             return jsonify({'error': f'No se puede borrar: {e}'}), 500
         except Exception as e:
@@ -468,7 +487,7 @@ def create_app():
                         (username, hashed_password, rol))
             conn.commit()
             new_id = get_last_insert_id(cur, conn)
-        except mariadb.IntegrityError:
+        except IntegrityError:
             return jsonify({'error': 'El nombre de usuario ya existe'}), 409
         finally:
             cur.close()
@@ -554,7 +573,7 @@ def create_app():
             cur.close()
             conn.close()
             return jsonify({'id': new_id}), 201
-        except mariadb.IntegrityError as e:
+        except IntegrityError as e:
             if conn:
                 try:
                     conn.rollback()
