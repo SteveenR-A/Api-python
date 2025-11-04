@@ -8,3 +8,5 @@ requests
 # Dev / test
 pytest
 Flask-Bcrypt
+pandas
+openpyxl

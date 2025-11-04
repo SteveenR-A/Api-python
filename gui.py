@@ -9,8 +9,15 @@ import time
 import sys
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import filedialog
 from tkinter import ttk
 from tkinter import simpledialog
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except Exception:
+    pd = None
+    HAS_PANDAS = False
 
 # Usar API_URL del entorno, o default
 API_URL = os.getenv('API_URL', 'http://127.0.0.1:5000')
@@ -294,6 +301,21 @@ class ReportWindow(ctk.CTkToplevel):
         top_frame = ctk.CTkFrame(self)
         top_frame.pack(pady=10, padx=10, fill="x")
 
+        # Botón para exportar el reporte actual a Excel
+        try:
+            if HAS_PANDAS:
+                export_btn = ctk.CTkButton(top_frame, text="Exportar a Excel", command=self.export_to_excel)
+            else:
+                # Si pandas no está disponible, mostrar botón que indica dependencia
+                export_btn = ctk.CTkButton(
+                    top_frame,
+                    text="Exportar a Excel (instala pandas)",
+                    command=lambda: messagebox.showwarning('Dependencia', 'Instala pandas y openpyxl: pip install pandas openpyxl')
+                )
+            export_btn.pack(side="right", padx=5)
+        except Exception:
+            pass
+
         if self.report_type in ["Ventas", "Ganancias", "Compras"]:
             ctk.CTkLabel(top_frame, text="Desde (YYYY-MM-DD):").pack(side="left", padx=5)
             self.desde_entry = ctk.CTkEntry(top_frame, placeholder_text="2023-01-01")
@@ -386,6 +408,46 @@ class ReportWindow(ctk.CTkToplevel):
         for col, text, width in columns:
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w")
+
+    def export_to_excel(self):
+        """Exporta el contenido visible del Treeview a un archivo .xlsx usando pandas."""
+        if not HAS_PANDAS:
+            messagebox.showerror('Exportar', 'La librería pandas no está instalada. Instala pandas y openpyxl: pip install pandas openpyxl')
+            return
+        # Recolectar columnas y filas
+        cols = list(self.tree.cget('columns'))
+        if not cols:
+            messagebox.showwarning('Exportar', 'No hay columnas para exportar.')
+            return
+
+        rows = []
+        for iid in self.tree.get_children():
+            vals = self.tree.item(iid, 'values')
+            # Asegurar que vals tenga la misma longitud que cols
+            row = {cols[i]: vals[i] if i < len(vals) else None for i in range(len(cols))}
+            rows.append(row)
+
+        if not rows:
+            messagebox.showwarning('Exportar', 'No hay datos para exportar.')
+            return
+
+        # Pedir ruta al usuario
+        try:
+            filepath = filedialog.asksaveasfilename(defaultextension='.xlsx', filetypes=[('Excel files', '*.xlsx')], title='Guardar reporte como')
+        except Exception as e:
+            messagebox.showerror('Exportar', f'Error al abrir diálogo de guardado: {e}')
+            return
+
+        if not filepath:
+            return
+
+        try:
+            df = pd.DataFrame(rows, columns=cols)
+            # Intentar escribir con pandas (openpyxl o xlsxwriter debe estar instalado)
+            df.to_excel(filepath, index=False)
+            messagebox.showinfo('Exportar', f'Reporte exportado a {filepath}')
+        except Exception as e:
+            messagebox.showerror('Exportar', f'Error al exportar a Excel: {e}')
 
 
 class MainApp(ctk.CTk):

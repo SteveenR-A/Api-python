@@ -376,15 +376,24 @@ def create_app():
     @app.route('/clientes', methods=['POST'])
     def cliente_create():
         data = request.get_json() or {}
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute('INSERT INTO Clientes (nombre, direccion, telefono, email) VALUES (%s, %s, %s, %s)',
-            (data.get('nombre'), data.get('direccion'), data.get('telefono'), data.get('email')))
-    conn.commit()
-    new_id = get_last_insert_id(cur, conn)
-    cur.close()
-    conn.close()
-    return jsonify({'id': new_id}), 201
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute('INSERT INTO Clientes (nombre, direccion, telefono, email) VALUES (%s, %s, %s, %s)',
+                        (data.get('nombre'), data.get('direccion'), data.get('telefono'), data.get('email')))
+            conn.commit()
+            new_id = get_last_insert_id(cur, conn)
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            cur.close()
+            conn.close()
+            return jsonify({'error': str(e)}), 500
+        cur.close()
+        conn.close()
+        return jsonify({'id': new_id}), 201
 
     @app.route('/clientes/<int:cliente_id>', methods=['PUT'])
     def cliente_update(cliente_id):

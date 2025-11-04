@@ -69,6 +69,25 @@ python app_compacto.py
 python gui.py
 ```
 
+Exportar reportes a Excel
+-------------------------
+
+La interfaz de reportes incluye un botón "Exportar a Excel" que permite guardar el reporte actual en un archivo .xlsx. Para usarlo:
+
+1. Abre la GUI y ve a "Reportes" → selecciona el tipo de reporte que quieras (Ventas, Compras, Ganancias, Existencias, etc.).
+2. Filtra por fechas si aplica y genera el reporte.
+3. Haz clic en el botón "Exportar a Excel" (arriba a la derecha en la ventana del reporte) y elige la ubicación y el nombre del archivo.
+
+Dependencias
+------------
+Para que la exportación a Excel funcione, instala las siguientes dependencias además de las ya listadas:
+
+```bash
+pip install pandas openpyxl
+```
+
+Esto también está incluido en `requirements.txt`.
+
 Notas
 
 - `gui.py` intenta arrancar `app_compacto.py` en background si no detecta la API en `API_URL`.
