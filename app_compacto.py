@@ -383,8 +383,98 @@ def create_app():
         return jsonify({'id': new_id}), 201
 
     # --- CRUD (Simplificado) para Compras, Ventas y Detalles ---
-    # (Se omiten GET, POST, PUT, DELETE para brevedad, pero seguirían el mismo patrón que Proveedores/Productos/Clientes)
-    # ... Aquí irían los endpoints para Ventas, Detalle_Ventas, Compras, Detalle_Compras ...
+    # Endpoints para Ventas y Detalle_Ventas (simplificados pero transaccionales)
+    @app.route('/ventas', methods=['POST'])
+    def ventas_create():
+        """Crear una venta. Espera JSON con: fecha_venta (YYYY-MM-DD opcional), id_cliente (opcional), total."""
+        data = request.get_json() or {}
+        fecha_venta = data.get('fecha_venta') or datetime.now().strftime('%Y-%m-%d')
+        id_cliente = data.get('id_cliente')
+        try:
+            total = float(data.get('total', 0))
+        except Exception:
+            return jsonify({'error': 'total inválido'}), 400
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute('INSERT INTO Ventas (fecha_venta, id_cliente, total) VALUES (%s, %s, %s)', (fecha_venta, id_cliente, total))
+            conn.commit()
+            new_id = getattr(cur, 'lastrowid', None)
+            cur.close()
+            conn.close()
+            return jsonify({'id': new_id}), 201
+        except Exception as e:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/detalle_ventas', methods=['POST'])
+    def detalle_ventas_create():
+        """Crear un detalle de venta y reducir el stock del producto de forma transaccional.
+
+        JSON esperado: id_venta, id_producto, cantidad, precio_unitario
+        """
+        data = request.get_json() or {}
+        try:
+            id_venta = int(data.get('id_venta'))
+            id_producto = int(data.get('id_producto'))
+            cantidad = int(data.get('cantidad'))
+            precio_unitario = float(data.get('precio_unitario', 0))
+        except Exception:
+            return jsonify({'error': 'Parámetros inválidos (id_venta, id_producto, cantidad, precio_unitario son requeridos)'}), 400
+
+        conn = None
+        cur = None
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            # Bloquear fila del producto para evitar condiciones de carrera
+            cur.execute('SELECT stock FROM Productos WHERE id_producto = %s FOR UPDATE', (id_producto,))
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return jsonify({'error': 'Producto no encontrado'}), 404
+            stock_actual = int(row[0])
+            if cantidad <= 0:
+                conn.rollback()
+                return jsonify({'error': 'Cantidad debe ser mayor que 0'}), 400
+            if stock_actual < cantidad:
+                conn.rollback()
+                return jsonify({'error': f'Stock insuficiente. Disponible: {stock_actual}'},), 400
+
+            # Insertar detalle de venta
+            cur.execute('INSERT INTO Detalle_Ventas (id_venta, id_producto, cantidad, precio_unitario) VALUES (%s, %s, %s, %s)',
+                        (id_venta, id_producto, cantidad, precio_unitario))
+
+            # Reducir stock
+            cur.execute('UPDATE Productos SET stock = stock - %s WHERE id_producto = %s', (cantidad, id_producto))
+
+            conn.commit()
+            new_id = getattr(cur, 'lastrowid', None)
+            cur.close()
+            conn.close()
+            return jsonify({'id': new_id}), 201
+        except mariadb.IntegrityError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            return jsonify({'error': str(e)}), 500
 
     # --- REPORTES [cite: 1181, 1182, 1183, 1184, 1185] ---
 

@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import sys
+import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
 from tkinter import simpledialog
@@ -460,9 +461,58 @@ class MainApp(ctk.CTk):
         self.form_title = ctk.CTkLabel(self.form_frame, text="Detalle", font=ctk.CTkFont(size=16, weight="bold"))
         self.form_title.pack(pady=(10, 15), padx=10)
 
-        # Contenedor para los campos del formulario
-        self.fields_container = ctk.CTkFrame(self.form_frame, fg_color="transparent")
-        self.fields_container.pack(fill="x", expand=True, padx=10)
+        # Contenedor desplazable para los campos del formulario
+        # Usamos un Canvas + ventana interna (inner_frame) para poder desplazar
+        # muchos campos sin esconder los botones inferiores.
+        self._form_canvas = tk.Canvas(self.form_frame, borderwidth=0, highlightthickness=0)
+        self._form_canvas.pack(side='left', fill='both', expand=True, padx=(10,0), pady=(0,10))
+
+        self._form_scrollbar = ctk.CTkScrollbar(self.form_frame, orientation='vertical', command=self._form_canvas.yview)
+        self._form_scrollbar.pack(side='right', fill='y', padx=(0,10), pady=(0,10))
+
+        self._form_canvas.configure(yscrollcommand=self._form_scrollbar.set)
+
+        # Marco interno donde colocaremos los campos (usamos CTkFrame para mantener estilo)
+        self.fields_container = ctk.CTkFrame(self._form_canvas, fg_color="transparent")
+        self._form_window = self._form_canvas.create_window((0, 0), window=self.fields_container, anchor='nw')
+
+        # Ajustar la región de scroll cuando cambie el tamaño del contenido
+        def _on_frame_config(event):
+            try:
+                self._form_canvas.configure(scrollregion=self._form_canvas.bbox('all'))
+            except Exception:
+                pass
+
+        self.fields_container.bind('<Configure>', _on_frame_config)
+
+        # Ajustar el ancho del inner frame cuando cambie el canvas
+        def _on_canvas_config(event):
+            try:
+                canvas_width = event.width
+                # set the inner frame width to match canvas
+                self._form_canvas.itemconfig(self._form_window, width=canvas_width)
+            except Exception:
+                pass
+
+        self._form_canvas.bind('<Configure>', _on_canvas_config)
+
+        # Rueda del ratón (Windows / macOS / Linux)
+        def _on_mousewheel(event):
+            # Windows/macOS
+            delta = 0
+            if hasattr(event, 'delta'):
+                delta = int(-1 * (event.delta / 120))
+            self._form_canvas.yview_scroll(delta, 'units')
+
+        def _on_button4(event):
+            self._form_canvas.yview_scroll(-1, 'units')
+
+        def _on_button5(event):
+            self._form_canvas.yview_scroll(1, 'units')
+
+        self._form_canvas.bind_all('<MouseWheel>', _on_mousewheel)
+        self._form_canvas.bind_all('<Button-4>', _on_button4)
+        self._form_canvas.bind_all('<Button-5>', _on_button5)
 
         # Diccionario para guardar etiquetas y campos
         self.form_fields = {}
@@ -475,6 +525,13 @@ class MainApp(ctk.CTk):
         self.btn_new.pack(fill="x", pady=4)
         self.btn_save = ctk.CTkButton(buttons_frame, text="Guardar", command=self.save_current)
         self.btn_save.pack(fill="x", pady=4)
+        # Botón para iniciar una venta asociada al cliente seleccionado
+        self.btn_sell_client = ctk.CTkButton(buttons_frame, text="Vender (Cliente)", fg_color="#3B8ED0", hover_color="#3071A8", command=self.open_client_sell_dialog)
+        self.btn_sell_client.pack(fill="x", pady=4)
+        try:
+            self.btn_sell_client.configure(state='disabled')
+        except Exception:
+            pass
 
         if self.user_role == 'administrador':
             self.btn_delete = ctk.CTkButton(buttons_frame, text="Borrar", fg_color="#d9534f", hover_color="#b52b27", command=self.delete_current)
@@ -565,6 +622,12 @@ class MainApp(ctk.CTk):
 
     def clear_form(self):
         self._current_id = None
+        # Deshabilitar boton de venta por cliente al limpiar
+        if hasattr(self, 'btn_sell_client'):
+            try:
+                self.btn_sell_client.configure(state='disabled')
+            except Exception:
+                pass
         for name, field in self.form_fields.items():
             field["entry"].delete(0, 'end')
 
@@ -600,6 +663,17 @@ class MainApp(ctk.CTk):
                  # Convertir None a cadena vacía para la entrada
                  value_to_insert = vals[col_index] if vals[col_index] is not None else ""
                  self.form_fields[form_key]["entry"].insert(0, value_to_insert)
+
+        # Habilitar botón de venta por cliente sólo si el recurso actual es Clientes
+        try:
+            if getattr(self, '_current_id', None) and self.resource_var.get() == 'Clientes':
+                if hasattr(self, 'btn_sell_client'):
+                    self.btn_sell_client.configure(state='normal')
+            else:
+                if hasattr(self, 'btn_sell_client'):
+                    self.btn_sell_client.configure(state='disabled')
+        except Exception:
+            pass
 
 
     def save_current(self):
@@ -723,6 +797,240 @@ class MainApp(ctk.CTk):
 
 
             self.after(0, ui_after)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------------- Venta por Cliente (multi-producto) ----------------
+    def open_client_sell_dialog(self):
+        """Abre un diálogo que permite seleccionar varios productos y cantidades para el cliente seleccionado."""
+        if not getattr(self, '_current_id', None):
+            messagebox.showwarning("Vender", "Selecciona un cliente de la lista primero.")
+            return
+
+        client_id = int(self._current_id)
+
+        # Ventana de diálogo
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Vender a cliente")
+        dialog.geometry("600x400")
+
+        header = ctk.CTkLabel(dialog, text=f"Registrar venta para cliente ID {client_id}", font=ctk.CTkFont(size=14, weight="bold"))
+        header.pack(pady=8)
+
+        # Fecha de venta y cliente
+        meta_frame = ctk.CTkFrame(dialog)
+        meta_frame.pack(fill='x', padx=10)
+        ctk.CTkLabel(meta_frame, text='Fecha (YYYY-MM-DD):').pack(side='left', padx=(0,6))
+        import datetime as _dt
+        fecha_default = _dt.date.today().strftime('%Y-%m-%d')
+        fecha_entry = ctk.CTkEntry(meta_frame, width=140)
+        fecha_entry.insert(0, fecha_default)
+        fecha_entry.pack(side='left', padx=(0,12))
+        ctk.CTkLabel(meta_frame, text=f'Cliente ID: {client_id}').pack(side='left')
+
+        rows_frame = ctk.CTkFrame(dialog)
+        rows_frame.pack(fill='both', expand=True, padx=10, pady=8)
+
+        controls_frame = ctk.CTkFrame(dialog)
+        controls_frame.pack(fill='x', padx=10, pady=(0,10))
+
+        # Lista local de productos (id, nombre, precio_venta, stock)
+        products_list = []
+
+        loading_label = ctk.CTkLabel(rows_frame, text="Cargando productos...")
+        loading_label.pack(pady=20)
+
+        product_rows = []
+
+        def add_row(prod_options=None):
+            row = ctk.CTkFrame(rows_frame)
+            row.pack(fill='x', pady=4)
+            # OptionMenu para producto
+            var = ctk.StringVar(value="")
+            if prod_options:
+                names = [f"{p['id']} - {p['nombre']} (stock:{p['stock']})" for p in prod_options]
+            else:
+                names = ["Cargando..."]
+            opt = ctk.CTkOptionMenu(row, values=names, variable=var)
+            opt.pack(side='left', padx=6, pady=2, expand=True, fill='x')
+            # Precio unitario (label)
+            price_label = ctk.CTkLabel(row, text='P.Unit: 0.00', width=110)
+            price_label.pack(side='left', padx=6)
+            # Stock (label)
+            stock_label = ctk.CTkLabel(row, text='Stock: 0', width=90)
+            stock_label.pack(side='left', padx=6)
+            qty_entry = ctk.CTkEntry(row, width=80, placeholder_text='Cantidad')
+            qty_entry.pack(side='left', padx=6)
+            # Bind para recalcular total cuando cambie cantidad
+            qty_entry.bind('<KeyRelease>', lambda e: update_total())
+
+            remove_btn = ctk.CTkButton(row, text='Eliminar', fg_color='#d9534f', hover_color='#b52b27', width=90,
+                                      command=lambda r=row: (r.destroy(), product_rows.remove((row, var, qty_entry, price_label, stock_label)), update_total()))
+            remove_btn.pack(side='left', padx=6)
+            product_rows.append((row, var, qty_entry, opt, price_label, stock_label))
+
+        def populate_products(prods):
+            nonlocal products_list
+            products_list = prods
+            loading_label.destroy()
+            # Crear una fila inicial
+            add_row(products_list)
+            update_total()
+
+        def fetch_products_worker():
+            try:
+                r = SESSION.get(f"{API_URL}/productos", timeout=6)
+                if r.status_code == 200:
+                    prods = r.json()
+                    # normalizar
+                    normalized = []
+                    for p in prods:
+                        normalized.append({'id': p.get('id'), 'nombre': p.get('nombre'), 'precio_venta': float(p.get('precio_venta') or 0), 'stock': int(p.get('stock') or 0)})
+                    dialog.after(0, lambda: populate_products(normalized))
+                else:
+                    dialog.after(0, lambda: messagebox.showerror('Error', f'No se pudieron cargar productos: {r.status_code} {r.text}'))
+            except Exception as e:
+                dialog.after(0, lambda: messagebox.showerror('Conexión', f'Error al cargar productos: {e}'))
+
+        threading.Thread(target=fetch_products_worker, daemon=True).start()
+
+        def on_add_product():
+            if products_list:
+                add_row(products_list)
+
+        def update_total():
+            total = 0.0
+            for (_row, var, qty_entry, opt, price_label, stock_label) in product_rows:
+                choice = var.get()
+                if not choice:
+                    continue
+                try:
+                    prod_id = int(choice.split(' - ')[0])
+                except Exception:
+                    continue
+                prod = next((p for p in products_list if p['id'] == prod_id), None)
+                if not prod:
+                    continue
+                # actualizar labels si es necesario
+                try:
+                    price_label.configure(text=f"P.Unit: {prod['precio_venta']:.2f}")
+                    stock_label.configure(text=f"Stock: {prod['stock']}")
+                except Exception:
+                    pass
+                qty_str = qty_entry.get()
+                try:
+                    qty = int(qty_str) if qty_str else 0
+                except Exception:
+                    qty = 0
+                total += qty * prod['precio_venta']
+            try:
+                total_label.configure(text=f"Total: {total:.2f}")
+            except Exception:
+                pass
+
+        def on_confirm():
+            # Leer filas y construir lista de items
+            items = []
+            for (_row, var, qty_entry, opt) in product_rows:
+                choice = var.get()
+                if not choice:
+                    continue
+                try:
+                    # choice like 'id - nombre (stock:x)'
+                    prod_id = int(choice.split(' - ')[0])
+                except Exception:
+                    messagebox.showerror('Error', f'Producto inválido: {choice}')
+                    return
+                qty_str = qty_entry.get()
+                try:
+                    qty = int(qty_str)
+                except Exception:
+                    messagebox.showerror('Error', f'Cantidad inválida: {qty_str}')
+                    return
+                if qty <= 0:
+                    messagebox.showwarning('Venta', 'La cantidad debe ser mayor que cero')
+                    return
+                # buscar precio y stock
+                prod = next((p for p in products_list if p['id'] == prod_id), None)
+                if not prod:
+                    messagebox.showerror('Error', f'Producto {prod_id} no encontrado')
+                    return
+                if qty > prod['stock']:
+                    messagebox.showwarning('Venta', f'Stock insuficiente para {prod["nombre"]}. Disponible {prod["stock"]}')
+                    return
+                items.append({'id_producto': prod_id, 'cantidad': qty, 'precio_unitario': prod['precio_venta']})
+
+            if not items:
+                messagebox.showwarning('Venta', 'Agrega al menos un producto a la venta')
+                return
+
+            # Confirmar y procesar
+            if not messagebox.askyesno('Confirmar Venta', f'Registrar venta con {len(items)} producto(s) para cliente {client_id}?'):
+                return
+
+            # Llamar al worker que procesa la venta
+            dialog.withdraw()
+            self.process_sale_multi(client_id, items, callback=lambda ok, msg=None: (dialog.destroy(), messagebox.showinfo('OK', msg) if ok else messagebox.showerror('Error', msg)))
+
+        total_label = ctk.CTkLabel(controls_frame, text='Total: 0.00', font=ctk.CTkFont(size=14, weight='bold'))
+        total_label.pack(side='left', padx=6)
+
+        add_btn = ctk.CTkButton(controls_frame, text='Agregar Producto', command=on_add_product)
+        add_btn.pack(side='left', padx=6)
+        confirm_btn = ctk.CTkButton(controls_frame, text='Confirmar Venta', fg_color='#28a745', hover_color='#218838', command=on_confirm)
+        confirm_btn.pack(side='right', padx=6)
+        cancel_btn = ctk.CTkButton(controls_frame, text='Cancelar', fg_color='#6c757d', hover_color='#5a6268', command=dialog.destroy)
+        cancel_btn.pack(side='right', padx=6)
+
+    def process_sale_multi(self, client_id, items, callback=None):
+        """Procesa la venta multi-producto: crea venta y detalle_ventas para cada item.
+
+        items: lista de dicts con keys id_producto, cantidad, precio_unitario
+        callback: func(ok:bool, message:str) ejecutada en hilo principal cuando termina
+        """
+        def worker():
+            success = False
+            err = None
+            venta_id = None
+            total = round(sum(it['cantidad'] * float(it['precio_unitario']) for it in items), 2)
+            try:
+                venta_payload = {"fecha_venta": time.strftime('%Y-%m-%d'), "id_cliente": client_id, "total": total}
+                r = SESSION.post(f"{API_URL}/ventas", json=venta_payload, timeout=6)
+                if r.status_code != 201:
+                    err = f"Error creando venta: {r.status_code} {r.text}"
+                else:
+                    venta_id = r.json().get('id')
+                    # crear detalles
+                    for it in items:
+                        detalle = {"id_venta": venta_id, "id_producto": int(it['id_producto']), "cantidad": int(it['cantidad']), "precio_unitario": float(it['precio_unitario'])}
+                        rd = SESSION.post(f"{API_URL}/detalle_ventas", json=detalle, timeout=6)
+                        if rd.status_code != 201:
+                            err = f"Error creando detalle para producto {it['id_producto']}: {rd.status_code} {rd.text}"
+                            break
+                if not err:
+                    success = True
+            except Exception as e:
+                err = f"Error de conexión: {e}"
+
+            # Ejecutar callback en hilo principal
+            def ui_cb():
+                if success:
+                    # refrescar listados
+                    try:
+                        self.load_data_for('Productos')
+                        self.load_data_for('Clientes')
+                    except Exception:
+                        pass
+                    if callback:
+                        callback(True, f'Venta registrada (total: {total:.2f})')
+                else:
+                    if callback:
+                        callback(False, err or 'Error desconocido')
+
+            try:
+                self.after(0, ui_cb)
+            except Exception:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
