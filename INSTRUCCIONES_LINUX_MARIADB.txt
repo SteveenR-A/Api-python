@@ -1,4 +1,4 @@
-INSTRUCCIONES SIMPLES (Linux) — versión corta
+INSTRUCCIONES SIMPLES (Linux)
 
 Resumen rápido
 --------------
@@ -69,6 +69,5 @@ Problemas comunes
 - Faltan módulos: asegúrate de instalar `requirements.txt` dentro del venv.
 - Uso del archivo de esquema: usa exactamente el nombre de archivo que tienes en el repo.
 
-¿Quieres un script automático?
 -----------------------------
 Fin.
