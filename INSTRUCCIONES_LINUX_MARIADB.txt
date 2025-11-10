@@ -1,0 +1,74 @@
+INSTRUCCIONES SIMPLES (Linux) — versión corta
+
+Resumen rápido
+--------------
+Estos son los pasos mínimos para poner en marcha la app (API + GUI) en Linux usando MariaDB/MySQL. El script de la base de datos ya está en el repositorio (busca `db_schema.sql` — si tu fichero se llama `dbshema.sql` usa ese nombre).
+
+1) Instalar MariaDB (si no lo tienes)
+
+   sudo apt update
+   sudo apt install -y mariadb-server
+   sudo systemctl enable --now mariadb
+
+2) Crear base de datos y usuario (copia y pega en el cliente MariaDB)
+
+   sudo mariadb
+   -- dentro del prompt SQL ejecuta (ajusta la contraseña):
+   CREATE DATABASE inventario CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   CREATE USER 'api_user'@'localhost' IDENTIFIED BY 'TuPasswordSeguro';
+   GRANT ALL PRIVILEGES ON inventario.* TO 'api_user'@'localhost';
+   FLUSH PRIVILEGES;
+   EXIT;
+
+3) Importar el esquema (usa el nombre de archivo que esté en tu repo)
+
+   # desde la raíz del proyecto
+   mariadb -u api_user -p inventario < db_schema.sql
+
+   # Si tu archivo se llama distinto, reemplaza `db_schema.sql` por el nombre correcto.
+
+4) Crear y activar entorno Python, e instalar dependencias
+
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+
+5) Crear un `.env` mínimo en la raíz del proyecto (ejemplo)
+
+   DB_HOST=127.0.0.1
+   DB_USER=api_user
+   DB_PASSWORD=TuPasswordSeguro
+   DB_NAME=inventario
+   PORT=5000
+
+   Guarda ese archivo junto al código (misma carpeta que `app_compacto.py` o `launcher.py`).
+
+6) Ejecutar la aplicación (API + GUI)
+
+   # arrancar la API (en una terminal)
+   source .venv/bin/activate
+   python app_compacto.py
+
+   # en otra terminal, arrancar la GUI
+   source .venv/bin/activate
+   python gui.py
+
+   # alternativo: usar launcher (si existe) para arrancar API+GUI juntos
+   python launcher.py
+
+Comprobación rápida
+-------------------
+Después de arrancar la API, comprueba:
+
+   curl http://127.0.0.1:5000/health
+
+Problemas comunes
+-----------------
+- Error de conexión: revisa que MariaDB esté activo y las credenciales en `.env`.
+- Faltan módulos: asegúrate de instalar `requirements.txt` dentro del venv.
+- Uso del archivo de esquema: usa exactamente el nombre de archivo que tienes en el repo.
+
+¿Quieres un script automático?
+-----------------------------
+Fin.
